@@ -8,6 +8,8 @@ broadcast/
 
 # Snapshots, epochs, trees and the holder index are produced by the job, not checked in.
 data/
+# The same for a test or shadow run's own folder (--data data-lark, data-shadow).
+data-*/
 
 # Claude Code's local bookkeeping; the skill under .claude/skills is checked in.
 .claude/.cc-writes

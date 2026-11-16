@@ -3,6 +3,7 @@
 // and sh/verify-distributor.sh, which load the settings (migrations/envs/<env>/distributor.env)
 // into the environment first.
 //
+//   node tools/distributor-deployment.ts chain <env>      the node serves the chain the settings name
 //   node tools/distributor-deployment.ts record <env>     forge's broadcast record -> deployments/<env>/distributor.json
 //   node tools/distributor-deployment.ts verify <env>     the creation transaction against the pinned URD's creation code
 //   node tools/distributor-deployment.ts address <env>    prints the recorded address
@@ -132,10 +133,25 @@ function creationCode(): string {
   return readJson<{ bytecode: { object: string } }>(artifact).bytecode.object;
 }
 
+// Lark, the testnet forked from Hydration, keeps Hydration's chain id, so the chain id cannot tell a
+// Lark node from a mainnet one. The settings name their chain by its genesis hash (URD_GENESIS).
+export async function checkGenesis(rpc: Pick<Rpc, "call">, expected: string): Promise<void> {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(expected)) throw new Error(`URD_GENESIS is not a block hash: ${expected}`);
+  const genesis = await rpc.call("chain_getBlockHash", [0]);
+  if (typeof genesis !== "string" || genesis.toLowerCase() !== expected.toLowerCase()) {
+    throw new Error(
+      `the RPC node's genesis block is ${JSON.stringify(genesis)}, but these settings are for the chain that ` +
+        `starts at ${expected}; Lark has Hydration's chain id, so only the genesis tells them apart`,
+    );
+  }
+}
+
 async function connect(): Promise<{ rpc: Rpc; config: Config }> {
   const config = readJson<Config>(join(root, "config", "mainnet.json"));
   const rpc = makeRpc(need("RPC_HYDRATION"), { batchSize: config.rpcBatchSize });
   await checkChainId(rpc, config);
+  // Not set for the local fork: anvil only speaks the EVM's RPC.
+  if (process.env.URD_GENESIS) await checkGenesis(rpc, process.env.URD_GENESIS);
   return { rpc, config };
 }
 
@@ -219,8 +235,10 @@ async function record(env: string): Promise<void> {
 
 async function main(): Promise<void> {
   const [command, env] = process.argv.slice(2);
-  if (!command || !env) throw new Error("usage: distributor-deployment.ts <record|verify|address|deployer> <env>");
+  if (!command || !env)
+    throw new Error("usage: distributor-deployment.ts <chain|record|verify|address|deployer> <env>");
   if (!/^[a-z0-9-]+$/.test(env)) throw new Error(`bad environment name ${env}`);
+  if (command === "chain") return void (await connect());
   if (command === "record") return record(env);
   const state = loadState(env);
   const output = state.steps[0].output;

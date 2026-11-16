@@ -25,6 +25,11 @@ if [ "$ENV" = "fork" ]; then
   esac
 fi
 
+# The node must serve the chain these settings are for: its chain id, and its genesis hash where the
+# settings give one (URD_GENESIS). Lark keeps Hydration's chain id, so the id alone would let a
+# production run land on Lark, or a Lark run on Hydration.
+node "$ROOT_DIR/tools/distributor-deployment.ts" chain "$ENV"
+
 # Hydration's blocks carry no prevrandao, and forge refuses to run a script against such a chain
 # with the EVM version the URD is pinned to ("paris"). The scripts therefore run with "london",
 # which is only allowed because the URD compiles to the same bytes either way; that is checked

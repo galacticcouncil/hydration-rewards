@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { constructorArgs, creationProblems, expectedCreationInput } from "../tools/distributor-deployment.ts";
+import {
+  checkGenesis,
+  constructorArgs,
+  creationProblems,
+  expectedCreationInput,
+} from "../tools/distributor-deployment.ts";
 
 const OWNER = "0x70997970C51812dc3A010C7d01b50d7D74dc79C8";
 const DEPLOYER = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
@@ -40,4 +45,24 @@ test("the creation transaction must be the pinned code and arguments, sent by th
   assert.match(check({ receipt: { ...receipt, status: "0x0" } })[0], /it failed/);
   assert.deepEqual(check({ tx: null }), ["the creation transaction was not found"]);
   assert.deepEqual(check({ receipt: null }), ["its receipt was not found"]);
+});
+
+test("a node is told apart by its genesis hash, because Lark has Hydration's chain id", async () => {
+  const hydration = `0x${"af".repeat(32)}`;
+  const lark = `0x${"97".repeat(32)}`;
+  const node = (genesis: unknown) => ({
+    call: async (method: string, params: unknown[]) => {
+      assert.deepEqual([method, params], ["chain_getBlockHash", [0]]);
+      return genesis;
+    },
+  });
+  await checkGenesis(node(hydration), hydration);
+  await checkGenesis(node(hydration), hydration.toUpperCase().replace("0X", "0x"));
+  await assert.rejects(
+    checkGenesis(node(lark), hydration),
+    /genesis block is "0x9797.*only the genesis tells them apart/,
+  );
+  // A node that does not answer with a hash is not taken for the right chain.
+  await assert.rejects(checkGenesis(node(null), hydration), /genesis block is null/);
+  await assert.rejects(checkGenesis(node(hydration), "hydration"), /URD_GENESIS is not a block hash/);
 });

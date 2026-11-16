@@ -32,8 +32,13 @@ export PK_HYDRATION
 # The contract must be the pinned, unmodified URD.
 node "$ROOT_DIR/tools/check-pin.ts"
 
+# forge takes each gas limit from its own simulation, plus 30%. Hydration charges more than that for
+# the creation: on Lark, which runs Hydration's runtime, it used 1,340,292 gas where forge's limit
+# would have been 1,084,883, so the default runs out of gas. Twice the simulation covers it, as in
+# the money-market deploys; --slow waits for each of the three transactions before it sends the next.
 cd "$ROOT_DIR/contracts"
-forge script script/DeployRewardsDistributor.s.sol --rpc-url "$RPC_HYDRATION" --broadcast --legacy $FORGE_EVM
+forge script script/DeployRewardsDistributor.s.sol --rpc-url "$RPC_HYDRATION" --broadcast --legacy --slow \
+  --gas-estimate-multiplier 200 $FORGE_EVM
 unset PK_HYDRATION
 
 node "$ROOT_DIR/tools/distributor-deployment.ts" record "$ENV"
