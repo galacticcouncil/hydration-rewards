@@ -14,6 +14,10 @@ services:
       FIRST_EPOCH: FILL THIS DATE ALWAYS
       # An archive node: catching up reads state at blocks up to 72 hours old.
       RPC_HYDRATION: https://rpc.hydradx.cloud
+      # Optional, both or neither: the runner then posts each root and accepts it after the timelock
+      # (README, "Posting roots"). A key of its own, holding only a little WETH for gas.
+      # PRIVKEY: FILL THIS KEY ALWAYS
+      # URD_ADDRESS: FILL THIS ADDRESS ALWAYS
     volumes:
       - data:/data
     networks:

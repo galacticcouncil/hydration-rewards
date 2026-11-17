@@ -25,7 +25,7 @@ assets is not recorded. A different strategy is a code change, not a setting.
 | `src/eligibility.ts`, `src/allocate.ts`, `src/build-tree.ts`, `src/program.ts` | Who is eligible, the budget split, the cumulative tree in URD leaf format, and the program file reader. |
 | `src/lib/`, `src/types.ts` | RPC client, holder index, the snapshot block rule, addresses, file and number helpers; the shapes of the config, snapshots, programs and trees. |
 | `contracts/` | The URD (git submodule), the deploy script and Foundry tests against the real URD. |
-| `tools/` | Fixture generator and pin check, used by the tests and CI; the recorder and checker of a distributor deployment. |
+| `tools/` | Fixture generator and pin check, used by the tests and CI; the recorder and checker of a distributor deployment; the cutover referendum's EVM calls (`cutover-calls.ts`). |
 | `sh/`, `migrations/envs/`, `deployments/` | Deploying the distributor: the wrappers, the settings for each environment, and the record of what was deployed. |
 | `Dockerfile`, `docker/` | The runner's image and its Docker Swarm stack (see Running in Docker). |
 | `.claude/skills/reward-program/` | Claude skill: describe a change in plain words, get a previewed pull request. |
@@ -104,9 +104,10 @@ shell or in a `.env` file, see `.env.example`) or `--rpc` to use another archive
 an HTTP proxy run with `NODE_USE_ENV_PROXY=1`. The node must serve the chain id in
 `config/mainnet.json`, and errors name it by its host only, so a key in its URL stays out of logs.
 
-Posting a root is manual: the updater key calls `submitRoot(tree.root, sha256 of the tree file)`,
-and anyone calls `acceptRoot()` 12 hours later. Before posting, check that the tree's
-`previousRoot` is the root the URD holds. A claim uses the tree of the root the URD holds, not the
+Posting a root takes two calls: the updater key calls `submitRoot(tree.root, sha256 of the tree
+file)`, and anyone calls `acceptRoot()` 12 hours later. A person does it, or the runner when it is
+given the key (Posting roots, below). Before posting by hand, check that the tree's `previousRoot`
+is the root the URD holds. A claim uses the tree of the root the URD holds, not the
 latest tree, which may still be pending: `claim(account, PRIME, claimable, proof)` with
 `claims[account]` from `data/public/trees/<root()>.json` (see Files for the app).
 
@@ -140,14 +141,40 @@ within a few minutes, which its restart policy covers.
 An hour in which the chain produced no block is skipped and reported. Once the epoch's other hours
 are all taken, from an hour after the epoch ends, a person closes it with `--allow-partial`, which
 refuses before then. After a day that a person closed around with `--allow-gap`, it carries on from
-the newest tree. It does not post
-roots: after each close its log shows the `submitRoot(root, sha256)` call, with a warning while the
-denylist is provisional. `data/status.json` holds the open epoch, the latest tree's root, the
-epochs the last pass closed (also when it failed afterwards), the program and denylist hashes and
-the last error.
+the newest tree. After each close its log shows the `submitRoot(root, sha256)` call, with a warning
+while the denylist is provisional. `data/status.json` holds the open epoch, the latest tree's root,
+the epochs the last pass closed (also when it failed afterwards), the program and denylist hashes,
+what the last pass did about posting and the last error.
 
-Not built yet: hosting the published files, posting roots, checking the URD's root and PRIME
-balance, and alerting when a pass keeps failing.
+### Posting roots
+
+Without a key the runner posts nothing. With `PRIVKEY` (the root-posting key, 32 bytes of hex) and
+`URD_ADDRESS` (the distributor) in its environment it posts each root itself, one step a pass:
+
+- the newest tree's root is not on the distributor and nothing is pending: `submitRoot`;
+- a root of its own is pending and the timelock has passed: `acceptRoot`.
+
+It never posts over a pending root, because a new submission replaces the pending one and restarts
+its clock. Roots are cumulative, so when several epochs closed in the meantime it posts only the
+newest, once the pending one is accepted. It refuses, and says so in its log and in
+`data/status.json`, when:
+
+- a root on the distributor, or pending there, is not the root of a tree in its data directory:
+  someone else posted it, or this is the wrong distributor or data directory;
+- the newest tree was closed while the denylist was provisional;
+- the key's address is not a root updater.
+
+Only one of the two settings stops the start. A failure to post is reported and tried again on the
+next pass, and never stops the snapshots or the closes.
+
+With posting on, no person reads an epoch's summary before its root goes out: the timelock, in
+which the owner can call `revokePendingRoot()`, is the check that is left. The key can only
+propose roots, but whoever holds it can propose any root, so give the runner a key of its own that
+holds a little WETH for gas and nothing else, never the owner's. Transactions are signed and sent
+with viem: each call is simulated first, so a revert shows before a nonce is spent.
+
+Not built yet: hosting the published files, checking the URD's PRIME balance, and alerting when a
+pass keeps failing.
 
 ## Running in Docker
 
@@ -291,10 +318,16 @@ then record and check it:
 
 ```sh
 cd contracts && set -a && source ../migrations/envs/prod/distributor.env && set +a
-forge script script/DeployRewardsDistributor.s.sol --rpc-url "$RPC_HYDRATION" --broadcast --legacy \
-  --evm-version london --sender <deployer> --ledger      # or --account <keystore>
+node ../tools/distributor-deployment.ts chain prod       # the node is Hydration, not Lark
+forge script script/DeployRewardsDistributor.s.sol --rpc-url "$RPC_HYDRATION" --broadcast --legacy --slow \
+  --gas-estimate-multiplier 200 --evm-version london --sender <deployer> --ledger   # or --account <keystore>
 node ../tools/distributor-deployment.ts record prod && npm run verify:distributor
 ```
+
+forge takes each gas limit from its own simulation plus 30%, and Hydration charges more than that for
+the creation: on Lark, which runs Hydration's runtime, it used 1,340,292 gas where forge's limit
+would have been 1,084,883. So the scripts pass `--gas-estimate-multiplier 200`, and a `forge script`
+run by hand needs it too.
 
 With the root-posting address in `URD_UPDATER` in the settings, the multisig has nothing to send:
 the script deploys in three transactions instead (create, add the updater, hand ownership to the
@@ -318,6 +351,15 @@ fails the check too: the deployer owned the URD for longer than the script takes
 
 The script refuses a timelock of a day or more, because a new `submitRoot` replaces the pending
 root and restarts its clock.
+
+## The cutover referendum's calls
+
+`tools/cutover-calls.ts` builds the EVM calls of the referendum that stops the old stream (`LAUNCH.md`,
+"The referendum"): the new end of the PRIME stream on each aToken, and the move of PRIME from the old
+rewards pot to the distributor. A referendum wraps each one in
+`dispatcher.dispatchAsAaveManager(evm.call(...))` inside one `utility.batchAll`.
+`test/cutover-calls.test.ts` pins them to the calldata of a referendum that ran on Lark, Hydration's
+testnet.
 
 ## What stops a run
 

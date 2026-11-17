@@ -36,6 +36,14 @@ import { addDays, epochDayStart } from "./lib/epoch.ts";
 import { loadDenylist } from "./lib/denylist.ts";
 import { acquireLock, loadDotEnv, messageOf, readJson, sha256, toJson, writeText } from "./lib/io.ts";
 import { makeRpc } from "./lib/rpc.ts";
+import {
+  postRoots,
+  postingError,
+  postingSettings,
+  viemDistributor,
+  type Distributor,
+  type PostingStep,
+} from "./post-roots.ts";
 import { loadProgram, parseProgram } from "./program.ts";
 import { claimsFile, claimsPath, latestFile, latestPath, publishLatest } from "./publish.ts";
 import { snapshotHour } from "./snapshot.ts";
@@ -394,7 +402,11 @@ async function main() {
   // so a blank stops the start. A denylist that does not load stops it too; it is read again every tick.
   const program = loadProgram(a.program, config, { requireDecisions: true });
   const startDenylist = loadDenylist(a.denylist);
-  const rpc = makeRpc(a.rpc || env.RPC_HYDRATION || config.rpc, { batchSize: config.rpcBatchSize });
+  const rpcUrl = a.rpc || env.RPC_HYDRATION || config.rpc;
+  const rpc = makeRpc(rpcUrl, { batchSize: config.rpcBatchSize });
+  // With PRIVKEY and URD_ADDRESS the runner posts each root itself (src/post-roots.ts); half of the
+  // pair, or a key that is none, stops the start.
+  const posting = postingSettings(env);
   const log: Log = (line) => console.log(`${new Date().toISOString()} ${line}`);
   const takeHour = (target: number) => snapshotHour({ rpc, config, dataDir: a.data, target, log });
   const statusPath = join(a.data, "status.json");
@@ -408,10 +420,17 @@ async function main() {
       `denylist ${startDenylist.sha256}${startDenylist.provisional ? " (provisional)" : ""}; ` +
       `first epoch ${a["first-epoch"]}, data in ${a.data}`,
   );
+  log(
+    posting === null
+      ? "posting no roots: PRIVKEY and URD_ADDRESS are not set"
+      : `posting roots to the distributor ${posting.address} as ${posting.account}`,
+  );
 
   let lastProblem: string | null = null;
   let lastDenylist = startDenylist.sha256;
   let lastOnDisk = "null";
+  let distributor: Distributor | null = null;
+  let lastPosting = "";
   for (;;) {
     // A merged program file on disk stops the loaded one from closing its epochs (see tick).
     const onDisk = programOnDisk(a.program, config, program);
@@ -438,6 +457,23 @@ async function main() {
     if (problem !== lastProblem) log(problem ? `FAILED, will retry: ${problem}` : "recovered");
     lastProblem = problem;
     if (status.denylist) lastDenylist = status.denylist.sha256;
+    // Roots, when this runner posts them: one step a pass, after the closes. A pass that failed before
+    // it knew the newest tree posts nothing. A failure here is reported and tried again next pass, and
+    // never stops the snapshots or the closes.
+    let postingStep: PostingStep | { action: "failed"; reason: string } | null = null;
+    if (posting !== null && status.latestTree !== undefined) {
+      try {
+        distributor ??= await viemDistributor({ rpcUrl, chainId: config.chainId, ...posting });
+        postingStep = await postRoots({ distributor, dataDir: a.data, newest: status.latestTree, log });
+      } catch (error) {
+        postingStep = { action: "failed", reason: postingError(error) };
+      }
+      // what it is waiting for, or why it posts nothing, is logged once and again when it changes
+      const line = "reason" in postingStep ? `${postingStep.action}: ${postingStep.reason}` : postingStep.action;
+      if (line !== lastPosting && "reason" in postingStep && postingStep.action !== "none")
+        log(`posting roots, ${line}`);
+      lastPosting = line;
+    }
     if (JSON.stringify(onDisk) !== lastOnDisk) {
       lastOnDisk = JSON.stringify(onDisk);
       if (onDisk !== null) {
@@ -462,6 +498,7 @@ async function main() {
         programOnDisk: onDisk,
         firstEpoch: a["first-epoch"],
         ...status,
+        posting: postingStep,
         error: problem,
       }),
     );

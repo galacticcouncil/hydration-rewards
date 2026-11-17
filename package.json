@@ -28,6 +28,7 @@
   },
   "dependencies": {
     "@openzeppelin/merkle-tree": "1.0.8",
+    "viem": "2.46.1",
     "yaml": "2.9.1"
   },
   "devDependencies": {
