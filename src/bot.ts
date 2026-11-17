@@ -19,13 +19,16 @@
 // the wrong file is reported at once. The denylist is read on every tick, so a change to it applies
 // from the next close. One runner per data directory: it holds <data>/bot.lock while it runs.
 //
-// It does not post roots. After each close it prints what the root-posting key has to submit.
+// After each close it prints what the root-posting key has to submit. Given that key (PRIVKEY) and
+// the distributor's address (URD_ADDRESS) it posts each root itself, and accepts it once the
+// timelock has passed (src/post-roots.ts); without them it posts nothing.
 //
 // Usage:
 //   node src/bot.ts --first-epoch 2027-01-15 [--program programs/htoken-no-hollar-borrowers.yaml]
 //     [--data data] [--interval 60] [--once]
 // Environment, used when the flag is not given: FIRST_EPOCH, PROGRAM, DATA_DIR, BOT_INTERVAL_SECONDS,
-// RPC_HYDRATION. A .env file in the repository root is read too (see .env.example).
+// RPC_HYDRATION; and for posting PRIVKEY, URD_ADDRESS and, optionally, URD_GENESIS (the genesis hash
+// the node's chain must have). A .env file in the repository root is read too (see .env.example).
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -431,6 +434,7 @@ async function main() {
   let lastOnDisk = "null";
   let distributor: Distributor | null = null;
   let lastPosting = "";
+  let lastPostingLogged = 0;
   for (;;) {
     // A merged program file on disk stops the loaded one from closing its epochs (see tick).
     const onDisk = programOnDisk(a.program, config, program);
@@ -468,10 +472,19 @@ async function main() {
       } catch (error) {
         postingStep = { action: "failed", reason: postingError(error) };
       }
-      // what it is waiting for, or why it posts nothing, is logged once and again when it changes
+      // What it is waiting for, or why it posts nothing, is logged when it changes; a refusal or a
+      // failure that stays is said again every hour, and its end is logged too.
       const line = "reason" in postingStep ? `${postingStep.action}: ${postingStep.reason}` : postingStep.action;
-      if (line !== lastPosting && "reason" in postingStep && postingStep.action !== "none")
-        log(`posting roots, ${line}`);
+      const stuck = postingStep.action === "refuse" || postingStep.action === "failed";
+      const wasStuck = /^(refuse|failed)/.test(lastPosting);
+      if (line !== lastPosting || (stuck && Date.now() - lastPostingLogged >= 3_600_000)) {
+        if ("reason" in postingStep && postingStep.action !== "none") {
+          log(`posting roots, ${line}`);
+          lastPostingLogged = Date.now();
+        } else if (wasStuck) {
+          log("posting roots: recovered");
+        }
+      }
       lastPosting = line;
     }
     if (JSON.stringify(onDisk) !== lastOnDisk) {

@@ -152,26 +152,39 @@ Without a key the runner posts nothing. With `PRIVKEY` (the root-posting key, 32
 `URD_ADDRESS` (the distributor) in its environment it posts each root itself, one step a pass:
 
 - the newest tree's root is not on the distributor and nothing is pending: `submitRoot`;
-- a root of its own is pending and the timelock has passed: `acceptRoot`.
+- a root the newest tree builds on is pending and the timelock has passed: `acceptRoot`.
 
 It never posts over a pending root, because a new submission replaces the pending one and restarts
 its clock. Roots are cumulative, so when several epochs closed in the meantime it posts only the
 newest, once the pending one is accepted. It refuses, and says so in its log and in
-`data/status.json`, when:
+`data/status.json` (`posting`), when:
 
-- a root on the distributor, or pending there, is not the root of a tree in its data directory:
-  someone else posted it, or this is the wrong distributor or data directory;
-- the newest tree was closed while the denylist was provisional;
+- a root on the distributor, or pending there, is not one the newest tree builds on: someone else
+  posted it, or this is the wrong distributor or data directory;
+- a root it submitted is neither pending nor accepted any more: the owner revoked it, or replaced
+  it with an older one. It then posts nothing, also no newer tree, which would hold the same
+  amounts, until a person has looked and removed `data/posting.json`, where it records the last
+  root it submitted;
+- an epoch since the accepted root was closed while the denylist was provisional: the newest tree
+  holds that epoch's amounts;
 - the key's address is not a root updater.
 
-Only one of the two settings stops the start. A failure to post is reported and tried again on the
-next pass, and never stops the snapshots or the closes.
+Only one of the two settings stops the start. `URD_GENESIS`, optional, is the genesis hash the
+node's chain must have: Lark, the testnet forked from Hydration, keeps its chain id, so a
+transaction signed for one is valid on the other, and the key used on Hydration must never be
+used on Lark. A failure to post is reported and tried again on the next pass, and never stops the
+snapshots or the closes; a refusal or a failure that stays is logged again every hour.
 
 With posting on, no person reads an epoch's summary before its root goes out: the timelock, in
 which the owner can call `revokePendingRoot()`, is the check that is left. The key can only
 propose roots, but whoever holds it can propose any root, so give the runner a key of its own that
-holds a little WETH for gas and nothing else, never the owner's. Transactions are signed and sent
-with viem: each call is simulated first, so a revert shows before a nonce is spent.
+holds a little WETH for gas and nothing else, never the owner's.
+
+Transactions are signed and sent with viem. Each call is simulated first, so a revert shows before
+a nonce is spent. The gas limit is twice the node's estimate: Hydration meters new storage against
+the gas limit, and sent with exactly the estimate `submitRoot` stopped at its first storage write.
+The distributor is read at the finalized block, and a sent transaction counts once its block is
+final, because the newest blocks can still be replaced.
 
 Not built yet: hosting the published files, checking the URD's PRIME balance, and alerting when a
 pass keeps failing.

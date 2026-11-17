@@ -18,6 +18,8 @@ services:
       # (README, "Posting roots"). A key of its own, holding only a little WETH for gas.
       # PRIVKEY: FILL THIS KEY ALWAYS
       # URD_ADDRESS: FILL THIS ADDRESS ALWAYS
+      # Hydration's genesis hash: the runner then refuses a node of another chain with the same chain id.
+      # URD_GENESIS: "0xafdc188f45c71dacbaa0b62e16a91f726c7b8699a9748cdf715459de6b7f366d"
     volumes:
       - data:/data
     networks:

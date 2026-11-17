@@ -209,7 +209,7 @@ function botProcess(data: string, ...args: string[]) {
     [join(root, "src", "bot.ts"), "--once", "--data", data, "--rpc", "http://127.0.0.1:1", ...args],
     {
       encoding: "utf8",
-      env: { ...process.env, FIRST_EPOCH: "", PROGRAM: "" },
+      env: { ...process.env, FIRST_EPOCH: "", PROGRAM: "", PRIVKEY: "", URD_ADDRESS: "" },
     },
   );
 }
@@ -293,7 +293,7 @@ test("the runner releases its lock when it is stopped with SIGTERM, SIGINT or SI
         "--interval",
         "3600",
       ]),
-      { env: { ...process.env, FIRST_EPOCH: "", PROGRAM: "" }, stdio: "ignore" },
+      { env: { ...process.env, FIRST_EPOCH: "", PROGRAM: "", PRIVKEY: "", URD_ADDRESS: "" }, stdio: "ignore" },
     );
     const exited = new Promise((resolve) => child.once("exit", resolve));
     // Its first pass writes status.json; then it holds the lock and sleeps.
