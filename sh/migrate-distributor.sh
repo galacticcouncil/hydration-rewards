@@ -36,9 +36,12 @@ node "$ROOT_DIR/tools/check-pin.ts"
 # the creation: on Lark, which runs Hydration's runtime, it used 1,340,292 gas where forge's limit
 # would have been 1,084,883, so the default runs out of gas. Twice the simulation covers it, as in
 # the money-market deploys; --slow waits for each of the three transactions before it sends the next.
+# Hydration's base fee moves every block, and a legacy transaction priced at the base fee forge read
+# is dropped as GasPriceTooLow once it rises, so the price is twice that.
+GAS_PRICE=$(( $(cast gas-price --rpc-url "$RPC_HYDRATION") * 2 ))
 cd "$ROOT_DIR/contracts"
 forge script script/DeployRewardsDistributor.s.sol --rpc-url "$RPC_HYDRATION" --broadcast --legacy --slow \
-  --gas-estimate-multiplier 200 $FORGE_EVM
+  --gas-estimate-multiplier 200 --with-gas-price "$GAS_PRICE" $FORGE_EVM
 unset PK_HYDRATION
 
 node "$ROOT_DIR/tools/distributor-deployment.ts" record "$ENV"

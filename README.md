@@ -333,14 +333,17 @@ then record and check it:
 cd contracts && set -a && source ../migrations/envs/prod/distributor.env && set +a
 node ../tools/distributor-deployment.ts chain prod       # the node is Hydration, not Lark
 forge script script/DeployRewardsDistributor.s.sol --rpc-url "$RPC_HYDRATION" --broadcast --legacy --slow \
-  --gas-estimate-multiplier 200 --evm-version london --sender <deployer> --ledger   # or --account <keystore>
+  --gas-estimate-multiplier 200 --with-gas-price "$(( $(cast gas-price --rpc-url "$RPC_HYDRATION") * 2 ))" \
+  --evm-version london --sender <deployer> --ledger   # or --account <keystore>
 node ../tools/distributor-deployment.ts record prod && npm run verify:distributor
 ```
 
 forge takes each gas limit from its own simulation plus 30%, and Hydration charges more than that for
 the creation: on Lark, which runs Hydration's runtime, it used 1,340,292 gas where forge's limit
 would have been 1,084,883. So the scripts pass `--gas-estimate-multiplier 200`, and a `forge script`
-run by hand needs it too.
+run by hand needs it too. They also price each transaction at twice the node's gas price: the base
+fee moves every block, and a legacy transaction at exactly the price forge read is dropped as
+`GasPriceTooLow` as soon as it rises.
 
 With the root-posting address in `URD_UPDATER` in the settings, the multisig has nothing to send:
 the script deploys in three transactions instead (create, add the updater, hand ownership to the
