@@ -15,12 +15,12 @@ applies_from_epoch:
 # PRIME per day for each earning asset, shared by eligible accounts in proportion to their
 # eligible value over the day. Blank until decided; closing an epoch refuses to run while blank.
 budget_per_day:
-  HUSDC:
-  HUSDT:
-  HEURC:
+  HUSDC: 275.616
+  HUSDT: 275.616
+  HEURC: 243.1296
 
 # Hour of the day (UTC, 0-23) when each daily epoch starts. Blank until decided.
-epoch_start_hour_utc:
+epoch_start_hour_utc: 14
 
 earn_on_supply_of: [HUSDC, HUSDT, HEURC]
 

@@ -186,8 +186,7 @@ the gas limit, and sent with exactly the estimate `submitRoot` stopped at its fi
 The distributor is read at the finalized block, and a sent transaction counts once its block is
 final, because the newest blocks can still be replaced.
 
-Not built yet: hosting the published files, checking the URD's PRIME balance, and alerting when a
-pass keeps failing.
+Not built yet: checking the URD's PRIME balance, and alerting when a pass keeps failing.
 
 ## Running in Docker
 
@@ -199,7 +198,9 @@ docker build -t hydration-rewards --build-arg VCS_REF="$(git rev-parse HEAD)" .
 docker run --rm -e FIRST_EPOCH=2027-01-15 -v hydration-rewards-data:/data hydration-rewards
 ```
 
-`docker/stack.yml` is the stack for Docker Swarm (Swarmpit): one replica and the data volume. The
+`docker/stack.yml` is the stack for Docker Swarm (Swarmpit): one replica, the data volume, and an nginx
+that serves `data/public` read-only (Files for the app). Its configuration, `docker/files.nginx.conf`, is
+an external Swarm config: create it as `hydration-rewards-files-v1` before deploying the stack. The
 runner locks its data directory, so the old task is stopped before the new one starts, and the stack
 gives the service a fixed hostname so that a task replacing a crashed one takes the lock over within
 about 2½ minutes. The container is healthy while the runner refreshes that lock, which it does every

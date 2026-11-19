@@ -1,5 +1,5 @@
-# Stack for Docker Swarm (Swarmpit): the rewards runner and its data volume.
-version: "3.3"
+# Stack for Docker Swarm (Swarmpit): the rewards runner, its data volume and the files the app reads.
+version: "3.8"
 services:
   # Hourly snapshots and daily epochs (src/bot.ts). One replica only: the runner locks its data
   # directory, so the old task has to stop before the new one starts (the default update order).
@@ -19,7 +19,7 @@ services:
       # PRIVKEY: FILL THIS KEY ALWAYS
       # URD_ADDRESS: FILL THIS ADDRESS ALWAYS
       # Hydration's genesis hash: the runner then refuses a node of another chain with the same chain id.
-      # URD_GENESIS: "0xafdc188f45c71dacbaa0b62e16a91f726c7b8699a9748cdf715459de6b7f366d"
+      URD_GENESIS: "0xafdc188f45c71dacbaa0b62e16a91f726c7b8699a9748cdf715459de6b7f366d"
     volumes:
       - data:/data
     networks:
@@ -39,6 +39,46 @@ services:
       resources:
         limits:
           memory: 1G
+
+  # The files the app reads (README, "Files for the app"): data/public over HTTPS, with CORS.
+  files:
+    image: nginx:1.27-alpine
+    configs:
+      - source: files_conf
+        target: /etc/nginx/conf.d/default.conf
+    volumes:
+      - type: volume
+        source: data
+        target: /data
+        read_only: true
+    networks:
+      - default
+      - gateway
+    logging:
+      driver: json-file
+    deploy:
+      replicas: 1
+      labels:
+        traefik.enable: "true"
+        traefik.docker.network: gateway
+        traefik.http.routers.hydration-rewards.rule: Host(`rewards.play.hydration.cloud`)
+        traefik.http.routers.hydration-rewards.entrypoints: websecure
+        traefik.http.routers.hydration-rewards.tls: "true"
+        traefik.http.routers.hydration-rewards.tls.certresolver: myresolver
+        traefik.http.services.hydration-rewards.loadbalancer.server.port: "80"
+      resources:
+        limits:
+          memory: 128M
+
+networks:
+  gateway:
+    external: true
+
+configs:
+  # docker config create hydration-rewards-files-v1 docker/files.nginx.conf; a changed file gets a new name.
+  files_conf:
+    external: true
+    name: hydration-rewards-files-v1
 
 volumes:
   # The runner's only state, and the files the app reads under public/. Back it up.
