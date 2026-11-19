@@ -6,23 +6,24 @@ result into a cumulative Merkle root for Morpho's Universal Rewards Distributor 
 claim from. The URD is Morpho's contract, unmodified, pinned at
 `3de504b130835a12482e00e1c83dcf369448c80b`; `tools/check-pin.ts` fails if anyone edits it.
 
-The program pays PRIME on HUSDC, HUSDT and HEURC only to accounts that have not borrowed HOLLAR:
+The program pays PRIME on HUSDC and HUSDT only to accounts that have not borrowed HOLLAR:
 `programs/htoken-no-hollar-borrowers.yaml`. An account with HOLLAR debt above the program's
 allowance earns nothing for the hours it has that debt. Only HOLLAR debt counts; debt in other
-assets is not recorded. A different strategy is a code change, not a setting.
+assets is not recorded. The program has an end, 15 January 2027 at 16:00 UTC (`ends_at`): the epoch
+that ends then is the last one it pays. A different strategy is a code change, not a setting.
 
 ## Layout
 
 | Path | What it is |
 | --- | --- |
-| `programs/` | The program file: the first epoch it pays, budget, earning assets, start hour, HOLLAR allowance. `programs/README.md` explains every setting. |
+| `programs/` | The program file: the first epoch it pays, its end, budget, earning assets, start hour, HOLLAR allowance. `programs/README.md` explains every setting. |
 | `config/` | Chain addresses (`mainnet.json`) and accounts that never earn (`denylist.json`, which excludes nobody today). |
 | `src/snapshot.ts` | Hourly, once the hour is over: balances, HOLLAR debt per market and oracle prices at one of the hour's blocks, picked by the hash of the block after it. |
 | `src/close-epoch.ts` | Daily: the epoch's snapshots and the program become a payout CSV, a summary and the cumulative tree. |
 | `src/preview.ts` | What a program would pay, using snapshots already taken. Writes nothing. |
 | `src/bot.ts` | The runner: takes each hourly snapshot and closes each finished epoch. |
 | `src/publish.ts` | The files the app reads: claims and proofs per root, and who is earning. |
-| `src/eligibility.ts`, `src/allocate.ts`, `src/build-tree.ts`, `src/program.ts` | Who is eligible, the budget split, the cumulative tree in URD leaf format, and the program file reader. |
+| `src/eligibility.ts`, `src/allocate.ts`, `src/accruing.ts`, `src/build-tree.ts`, `src/program.ts` | Who is eligible, the budget split, the estimate of what the open epoch has paid so far, the cumulative tree in URD leaf format, and the program file reader. |
 | `src/lib/`, `src/types.ts` | RPC client, holder index, the snapshot block rule, addresses, file and number helpers; the shapes of the config, snapshots, programs and trees. |
 | `contracts/` | The URD (git submodule), the deploy script and Foundry tests against the real URD. |
 | `tools/` | Fixture generator and pin check, used by the tests and CI; the recorder and checker of a distributor deployment; the cutover referendum's EVM calls (`cutover-calls.ts`). |
@@ -56,8 +57,8 @@ then restart the runner with it once it has closed the epoch before `applies_fro
 restart, the runner reports the waiting file in its log and in `data/status.json` (`programOnDisk`,
 with the epoch it applies from), keeps closing the epochs before that one with the old file, and
 closes nothing from `applies_from_epoch` on; `public/latest.json` keeps showing the old file's
-rules. Its first pass after a restart checks the file against the stored epochs, and says what is
-wrong:
+rules, with no estimate for an open epoch the new file will pay. Its first pass after a restart
+checks the file against the stored epochs, and says what is wrong:
 - Too early: the open epoch is before `applies_from_epoch`, so it closes nothing (it still takes the
   hours). Close the earlier epochs by hand with the old file, or run the old file until they are
   closed. For the very first epoch, start with `--first-epoch` at `applies_from_epoch`, or move the
@@ -69,6 +70,11 @@ wrong:
   one not closed yet, in a new pull request.
 - An older file than the one that closed the newest epoch: restart with the newer one.
 
+A program that has ended (`ends_at`) is continued the same way, by a new file whose
+`applies_from_epoch` is the epoch that starts at `ends_at`: the ended runner names that epoch in
+`waiting` in `data/status.json`, and the runner restarted with the new file takes the hours from
+the end on, within its 72-hour backlog.
+
 ## Running
 
 The start hour, the budgets and the program's first epoch are decisions, so they have no
@@ -77,11 +83,11 @@ defaults; closing refuses to run while they are blank in the program file.
 ```sh
 # Every hour, once it has ended: the hour's block is picked by the hash of the first block after it,
 # so that block must be finalized. --at is unix seconds or a time with its zone.
-node src/snapshot.ts --at 2027-01-15T15:00:00Z
+node src/snapshot.ts --at 2026-12-15T15:00:00Z
 
 # Once a day, after the epoch's 24th snapshot (--genesis instead of --prev for the very first epoch):
-node src/close-epoch.ts --epoch 2027-01-15 --program programs/htoken-no-hollar-borrowers.yaml \
-  --prev data/trees/2027-01-14.json
+node src/close-epoch.ts --epoch 2026-12-15 --program programs/htoken-no-hollar-borrowers.yaml \
+  --prev data/trees/2026-12-14.json
 
 # Any time, to see what a program would pay:
 node src/preview.ts --program programs/htoken-no-hollar-borrowers.yaml
@@ -123,7 +129,7 @@ it: a snapshot that fails stops that pass's snapshots, but epochs whose snapshot
 still closed. Every failure is reported and tried again on the next pass, and nothing is skipped.
 
 ```sh
-node src/bot.ts --first-epoch 2027-01-15          # or FIRST_EPOCH; add --once for a single pass
+node src/bot.ts --first-epoch 2026-12-15          # or FIRST_EPOCH; add --once for a single pass
 ```
 
 It reads the program file once, when it starts (see Changing the program for when to restart it
@@ -145,6 +151,12 @@ the newest tree. After each close its log shows the `submitRoot(root, sha256)` c
 while the denylist is provisional. `data/status.json` holds the open epoch, the latest tree's root,
 the epochs the last pass closed (also when it failed afterwards), the program and denylist hashes,
 what the last pass did about posting and the last error.
+
+A program file with an end (`ends_at`) is run up to it. The runner takes no hour at or after the
+end, and the epoch that ends there is the last one it closes; after downtime across the end it
+still takes the hours before it and closes the epochs up to it. From then on a pass takes nothing
+and closes nothing, and that is no failure: `data/status.json` says in `waiting` that the program
+ended and when, `--once` exits 0, and the runner goes on posting and accepting the last root.
 
 ### Posting roots
 
@@ -186,6 +198,49 @@ the gas limit, and sent with exactly the estimate `submitRoot` stopped at its fi
 The distributor is read at the finalized block, and a sent transaction counts once its block is
 final, because the newest blocks can still be replaced.
 
+### Epochs shorter than a day
+
+An epoch is one day long unless the config file sets `epoch.lengthSeconds`. A test network can close
+an epoch, and so get a new root, every four hours:
+
+```json
+"epoch": { "snapshotsPerEpoch": 4, "lengthSeconds": 14400 }
+```
+
+`lengthSeconds` must be a whole number of hours that divides a day (3600, 7200, 10800, 14400, 21600,
+28800, 43200 or 86400), and `snapshotsPerEpoch` must split it into whole seconds. The snapshot
+interval is `lengthSeconds / snapshotsPerEpoch`, one hour in the example. `config/mainnet.json`
+leaves the setting out, which means 86400, and nothing about one-day epochs changes.
+
+With a shorter length:
+
+- An epoch's id is the UTC date and hour its window starts at, `2026-11-17T03`, instead of a date.
+  It is used wherever one-day epochs use a date: `--epoch`, `--first-epoch` / `FIRST_EPOCH`,
+  `applies_from_epoch`, and the file names (`data/trees/2026-11-17T03.json`,
+  `data/epochs/2026-11-17T03.csv`). A date is refused, and so is a date and hour when epochs are one
+  day long. `latestTree.epoch` and `openEpoch.id` in `public/latest.json` have this form too.
+- `epoch_start_hour_utc` is the hour the epochs are counted from. With 23 and four-hour epochs they
+  start at 23, 03, 07, 11, 15 and 19 UTC, and an id with any other hour is refused.
+- `ends_at` has to be a moment one of these epochs ends at, which is any of the hours they start
+  at, not the start hour alone. With 23 and four-hour epochs `2027-01-15T15:00:00Z` is one and
+  14:00 is not; with three-hour epochs 14:00 is. It has to be after the hour `applies_from_epoch`
+  names. The file that continues applies from the epoch that starts then, `2027-01-15T15`.
+- Each epoch pays `budget_per_day × lengthSeconds / 86400`, rounded down to a whole raw unit per
+  asset: 275.616 PRIME a day is 45.936 per four-hour epoch, and 80 a day is 13.333333.
+  `public/latest.json` still shows `budgetPerDay` as the program file has it. The estimate in
+  `openEpoch.accruing` starts from the epoch's share of the day, not from the day's budget, and
+  the preview's total up to `ends_at` is that share times the number of epochs.
+- A data directory holds epochs of one length. A tree closed with the other length is refused, as a
+  previous tree and as a file already in `data/trees`, so a runner with a new length needs a data
+  directory of its own and starts a new chain of trees there.
+- The distributor's timelock has to be shorter than the epoch: a new `submitRoot` replaces the
+  pending root and restarts its clock.
+
+```sh
+node src/bot.ts --config <config with lengthSeconds> --first-epoch 2026-11-17T03 \
+  --program <program file> --data <data folder>
+```
+
 Not built yet: checking the URD's PRIME balance, and alerting when a pass keeps failing.
 
 ## Running in Docker
@@ -195,12 +250,12 @@ keeps all its state in `/data`:
 
 ```sh
 docker build -t hydration-rewards --build-arg VCS_REF="$(git rev-parse HEAD)" .
-docker run --rm -e FIRST_EPOCH=2027-01-15 -v hydration-rewards-data:/data hydration-rewards
+docker run --rm -e FIRST_EPOCH=2026-12-15 -v hydration-rewards-data:/data hydration-rewards
 ```
 
 `docker/stack.yml` is the stack for Docker Swarm (Swarmpit): one replica, the data volume, and an nginx
 that serves `data/public` read-only (Files for the app). Its configuration, `docker/files.nginx.conf`, is
-an external Swarm config: create it as `hydration-rewards-files-v1` before deploying the stack. The
+an external Swarm config: create it as `hydration-rewards-files-v2` before deploying the stack. The
 runner locks its data directory, so the old task is stopped before the new one starts, and the stack
 gives the service a fixed hostname so that a task replacing a crashed one takes the lock over within
 about 2½ minutes. The container is healthy while the runner refreshes that lock, which it does every
@@ -250,7 +305,7 @@ the runner's own state and can contain RPC error text.
 | File | Written | Holds |
 | --- | --- | --- |
 | `public/trees/<root>.json` | When an epoch is closed, by the runner or by hand, before its tree; the runner writes any stored tree's file again if it goes missing | The reward token, the root, and every account's cumulative `claimable` and `proof` |
-| `public/latest.json` | By the runner, whenever a snapshot or a close changes it, or it restarts with another program file; not while it reports a program or denylist problem | Who is earning as of the newest snapshot, the daily budget and eligible value per asset, and the newest closed epoch's root |
+| `public/latest.json` | By the runner, whenever a snapshot, a close or a change to the denylist changes it, or it restarts with another program file, or finds a file from before `openEpoch` was added; not while it reports a program or denylist problem | Who is earning as of the newest snapshot, the daily budget and eligible value per asset, the program's end when it has one, the newest closed epoch's root, and the open epoch with an estimate of what each account has earned in it so far |
 
 To claim for an account:
 
@@ -262,22 +317,65 @@ To claim for an account:
 5. Call `claim(account, reward, claimable, proof)` with the cumulative `claimable` from the file,
    not the difference. Anyone can send it; the tokens go to `account`.
 
-The keys of `claims` and of `accounts` are lowercase 0x addresses: lowercase the address a wallet
-gives (it is often mixed case) before looking it up. The `account` sent to `claim` may be either.
-`claimable` and `budgetPerDay` are raw units of the reward token (`reward.decimals` in
-`latest.json`, 6 for PRIME); dollar amounts have two decimals.
+The keys of `claims`, of `accounts` and of `openEpoch.accruing` are lowercase 0x addresses:
+lowercase the address a wallet gives (it is often mixed case) before looking it up. The `account`
+sent to `claim` may be either. `claimable`, `budgetPerDay` and the amounts in `openEpoch.accruing`
+are raw units of the reward token (`reward.decimals` in `latest.json`, 6 for PRIME); dollar amounts
+have two decimals.
 
 In `latest.json`, `accounts[account]` is `{ earning: true }`, or `{ earning: false, reason }` with
 `reason` `hollar_debt` (more HOLLAR debt than `program.maxHollarDebtUsd`) or `excluded` (on the
 denylist). An account that is not listed supplied no earning asset at that snapshot. The yearly
 rate for an asset is
 `(assets[asset].budgetPerDay ÷ 10^reward.decimals) × 365 × reward price ÷ assets[asset].eligibleUsd`.
+`program.endsAt` is there only when the program has an end, and is that moment in unix seconds:
+no hour at or after it earns, and the epoch that ends then is the last one paid.
 
-Two things the app cannot show from these files: rewards do not accrue second by second (amounts
-change once a day, when an epoch closes), and `earning` is as of the last hourly snapshot, not live
-(an hour is taken after it ends, so the newest one is up to two hours old). While the runner
-reports a problem `latest.json` stops moving, so the app compares `asOf.hour` with the clock and
-shows older data as stale.
+`openEpoch` in `latest.json` is the epoch still open, the first one without a tree. It can already
+be over: while its close waits, for an hour without a block or for a program file on disk, the
+runner goes on taking later hours, `asOf.hour` moves past `end`, and those hours are in no estimate
+until it closes. Once the program has ended and its last epoch is closed no epoch is open, and
+`openEpoch` is `null`. Otherwise it holds:
+
+| Field | Holds |
+| --- | --- |
+| `id` | A label for the epoch, such as `2026-12-16`, for display only. Do not parse it: the window is `start` and `end` |
+| `start`, `end` | The epoch's window, in unix seconds |
+| `snapshots`, `expectedSnapshots` | How many of the epoch's snapshots exist, and how many a full epoch has |
+| `accruing` | For each account, an estimate of what it has earned in this epoch so far; `{}` when no account has earned anything, as while the epoch has no snapshot yet (`snapshots` says whether an hour is in); `null` when no estimate can be made |
+
+`accruing[account]` is an estimate. Each asset's budget for the epoch is scaled to
+`snapshots ÷ expectedSnapshots`, rounded down, and shared over the snapshots there are by the code
+that pays the rewards. None of it can be claimed until the epoch closes, and until then an amount
+can go down as well as up, because every later snapshot changes each account's share of the epoch.
+With the epoch's last snapshot in, it is exactly what the runner's close then adds to each
+account's `claimable` (an epoch closed by hand with `--allow-partial` pays the whole budget on the
+hours there are, which is more than the estimate said).
+
+- An account that is not in `accruing` has earned nothing in the epoch so far. Right after a close
+  the next epoch has no snapshot yet and `accruing` is `{}`.
+- `accruing` is `null` when no estimate can be made: a budget is undecided, a newer program file on
+  disk will pay this epoch (see Changing the program), or the estimate failed (the runner reports
+  that, tries again on every pass, and writes the rest of the file meanwhile). Show no amount then,
+  not zero.
+- `accruing` is a map of its own, not a field of `accounts[account]`, because the two answer
+  different questions. `accounts` lists who supplied at the newest snapshot; an account that
+  supplied earlier in the epoch and left has an amount in `accruing` and no entry in `accounts`,
+  and one that borrowed HOLLAR an hour ago is `earning: false` and still has an amount for the
+  hours before.
+- A file written by a runner from before `openEpoch` was added does not have the key: no estimate
+  is known, so show no amount. `openEpoch: null` says something else, that the program has ended
+  and nothing is accruing any more. The format name did not change for `openEpoch` or for
+  `program.endsAt`: fields are only added to `latest.json`, and an app ignores the ones it does
+  not know.
+
+Two things the app cannot show from these files: rewards do not accrue second by second (what can
+be claimed changes once an epoch, when it closes, and the open epoch's estimate once an hour,
+with each snapshot), and `earning` is as of the last hourly snapshot, not live (an hour is taken
+after it ends, so the newest one is up to two hours old). While the runner reports a problem
+`latest.json` stops moving, so the app compares `asOf.hour` with the clock and shows older data as
+stale. It also stops when the program ends, at the last hour before `program.endsAt`, and that is
+not stale data.
 Tree files are named after the root and never removed; `latestTree.root` differs from the
 distributor's root while a root is waiting out the timelock or has not been posted.
 
@@ -293,17 +391,19 @@ npm run fork:hydration             # a local fork of Hydration's EVM (anvil); le
 npm run migrate:distributor:fork   # deploy, record and check against the fork
 ```
 
-Then, with the rewards multisig in `URD_OWNER` in `migrations/envs/prod/distributor.env`:
+Then, with the owner in `URD_OWNER` in `migrations/envs/prod/distributor.env` (on mainnet the emergency
+admin `0xaa7e…aa7e1`, which the Technical Committee acts as by motion, or Root by referendum):
 
 ```sh
 PK_HYDRATION=<deployer key> npm run migrate:distributor
 ```
 
 The deployer needs an `EVMAccounts.ContractDeployer` slot on Hydration. The migration checks that
-the URD is the pinned, unmodified commit, deploys it in one transaction with the multisig as owner
+the URD is the pinned, unmodified commit, deploys it in one transaction with that owner
 (the deployer never holds a role), writes the record, and runs the checks below. It refuses to run
-again while a production record exists. The multisig then adds the root-posting key with
-`setRootUpdater(<root-posting address>, true)`, and the checks are run once more with that address:
+again while a production record exists. The owner then adds the root-posting key with
+`setRootUpdater(<root-posting address>, true)` (on mainnet, inside the cutover referendum), and the
+checks are run once more with that address:
 
 ```sh
 npm run verify:distributor -- <root-posting address>
@@ -313,7 +413,7 @@ npm run verify:distributor -- <root-posting address>
 that URD empty and deploy a new one; do not try to repair it. It checks:
 
 1. The state (`check(address)` in the deploy script): the code is the pinned URD's byte for byte (a
-   look-alike with a backdoor would answer every getter the same), the multisig is the owner (the
+   look-alike with a backdoor would answer every getter the same), the expected owner is the owner (the
    handover completed), the timelock is the one in the settings, no root is set or pending (a
    deployer that set the timelock to zero first can make its root acceptable at once), the deployer
    holds no role, and the root-posting address, when given, is an updater.
@@ -346,9 +446,9 @@ run by hand needs it too. They also price each transaction at twice the node's g
 fee moves every block, and a legacy transaction at exactly the price forge read is dropped as
 `GasPriceTooLow` as soon as it rises.
 
-With the root-posting address in `URD_UPDATER` in the settings, the multisig has nothing to send:
+With the root-posting address in `URD_UPDATER` in the settings, the owner has nothing to send:
 the script deploys in three transactions instead (create, add the updater, hand ownership to the
-multisig), and the checks include that address without it being passed. The deployer owns the URD
+owner), and the checks include that address without it being passed. The deployer owns the URD
 in between: it could submit a root of its own, or make itself an updater, before the handover.
 Prefer the single transaction. After a three-transaction deployment, also list what the deployer
 did while it owned the URD. The script sends its three transactions back to back, so the handover
@@ -362,7 +462,7 @@ cast logs --rpc-url "$RPC_HYDRATION" --address <URD> --from-block <creation bloc
   --to-block <creation block + 1000> 'RootUpdaterSet(address indexed rootUpdater, bool active)'
 ```
 
-The OwnerSet events must be the deployer at creation and then the multisig, and the only
+The OwnerSet events must be the deployer at creation and then the owner, and the only
 RootUpdaterSet before that handover must add the root-posting key. A handover outside the range
 fails the check too: the deployer owned the URD for longer than the script takes.
 
@@ -371,9 +471,9 @@ root and restarts its clock.
 
 ## The cutover referendum's calls
 
-`tools/cutover-calls.ts` builds the EVM calls of the referendum that stops the old stream (`LAUNCH.md`,
-"The referendum"): the new end of the PRIME stream on each aToken, and the move of PRIME from the old
-rewards pot to the distributor. A referendum wraps each one in
+`tools/cutover-calls.ts` builds the EVM calls of the referendum that stops the old stream: the new end
+of the PRIME stream on each aToken, and the move of PRIME from the old rewards pot to the
+distributor. A referendum wraps each one in
 `dispatcher.dispatchAsAaveManager(evm.call(...))` inside one `utility.batchAll`.
 `test/cutover-calls.test.ts` pins them to the calldata of a referendum that ran on Lark, Hydration's
 testnet.
@@ -391,9 +491,11 @@ testnet.
   another block than the one its hour's seed block picks (`--allow-partial` accepts missing hours
   and still pays the full budget, from an hour after the epoch ends).
 - A program file with an unknown setting or asset, an asset listed twice, a blank budget, start
-  hour or `applies_from_epoch`, or no HOLLAR allowance.
-- An epoch before the program file's `applies_from_epoch`, or a close after it on top of an epoch
-  that was closed with another file.
+  hour or `applies_from_epoch`, or no HOLLAR allowance; an `ends_at` that is not a UTC time on the
+  hour like `2027-01-15T14:00:00Z`, that no epoch ends at, or that is not after the start of
+  `applies_from_epoch`.
+- An epoch before the program file's `applies_from_epoch` or one that ends after its `ends_at`, or
+  a close after `applies_from_epoch` on top of an epoch that was closed with another file.
 - A previous tree that is not the day before's, or whose epoch did not end where this one starts
   (a changed start hour); `--allow-gap` overrides, for a day that could never be closed and has no
   tree. A close must build on the newest stored tree before it: `--allow-gap` past a closed day,
@@ -415,17 +517,18 @@ testnet.
 
 ## Open decisions
 
-- PRIME budget per day for each asset. Referendum 423 pays 275.616 PRIME/day each to HUSDC and
-  HUSDT on gross balances until 1800021600 (15 Jan 2027 14:00 UTC). HEURC's stream has already
-  ended, so its budget is new PRIME.
-- Epoch start hour and the cutover date (the first epoch, and the program's `applies_from_epoch`).
-  The live stream is stopped at the first epoch's start, and what is left in its pot moves to the
-  URD, by one referendum.
-  It ends by itself at 1800021600, so a first epoch that starts then needs no stop, only the move.
-- How the program is paid once what is left in the old pot is spent, and the margin left in that pot.
+Decided for the launch (2026-11-19): only HUSDC and HUSDT earn, 275.616 PRIME/day each, the rate of
+the stream Referendum 423 extended to 1800021600 (15 Jan 2027 14:00 UTC). The first epoch
+starts 2026-11-20 16:00 UTC, when a whitelisted referendum stops the old stream, moves what is left
+in its pot to the URD with no margin, and adds the root-posting address
+`0xaDA58c5a2953272b0BFf760C1E9D23C088fDD682`. The program ends on 15 Jan 2027 at 16:00 UTC, the
+hour its epochs end at.
 
+Still open:
+
+- How the program is paid once what is left in the old pot is spent.
 - What happens to an asset's budget when nobody is eligible (left undistributed and reported today).
-- Multisig signers, who holds the root-posting key, and how users claim.
+- How users claim.
 
 ## Known limits
 

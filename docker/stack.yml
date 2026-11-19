@@ -29,6 +29,10 @@ services:
     stop_grace_period: 30s
     deploy:
       replicas: 1
+      # The volume `data` is local to a node, and files serves it: both services run on the same node.
+      placement:
+        constraints:
+          - node.hostname == FILL THIS NODE ALWAYS
       # No swarmpit autoredeploy label: the program file is part of the image, and a new one has to
       # go live between two closes (README, "Changing the program").
       update_config:
@@ -58,6 +62,10 @@ services:
       driver: json-file
     deploy:
       replicas: 1
+      # The same node as bot: the volume `data` is local to it.
+      placement:
+        constraints:
+          - node.hostname == FILL THIS NODE ALWAYS
       labels:
         traefik.enable: "true"
         traefik.docker.network: gateway
@@ -75,10 +83,10 @@ networks:
     external: true
 
 configs:
-  # docker config create hydration-rewards-files-v1 docker/files.nginx.conf; a changed file gets a new name.
+  # docker config create hydration-rewards-files-v2 docker/files.nginx.conf; a changed file gets a new name.
   files_conf:
     external: true
-    name: hydration-rewards-files-v1
+    name: hydration-rewards-files-v2
 
 volumes:
   # The runner's only state, and the files the app reads under public/. Back it up.

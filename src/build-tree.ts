@@ -6,11 +6,11 @@
 // (address, address, uint256). `claimable` is cumulative: a claim pays
 // claimable - claimed[account][reward], so every account from earlier epochs must stay in
 // the tree and no amount may ever go down. That is why the previous tree must be the one for
-// the day before: building on an older tree silently drops the days in between.
+// the epoch before: building on an older tree silently drops the epochs in between.
 
 import { StandardMerkleTree } from "@openzeppelin/merkle-tree";
 import { compareAddresses, normalizeAddress } from "./lib/accounts.ts";
-import { addDays, epochDayStart } from "./lib/epoch.ts";
+import { addEpochs, DAY, parseEpochId } from "./lib/epoch.ts";
 import type { EpochWindow, Tree } from "./types.ts";
 
 const TREE_FORMAT = "hydration-rewards-tree/1";
@@ -28,10 +28,12 @@ function merkleTree(reward: string, cumulative: Map<string, bigint>) {
 
 const sum = (amounts: Iterable<bigint>): bigint => [...amounts].reduce((a, b) => a + b, 0n);
 
-// Reads a tree this tool wrote earlier and proves it is intact by rebuilding its root.
-function readTree(tree: Tree, reward: string): Map<string, bigint> {
+// Reads a tree this tool wrote earlier and proves it is intact by rebuilding its root. Its epoch must
+// be one of the same length as the epoch being built: ids of two lengths do not compare, and a tree
+// of one-day epochs is not the epoch before a shorter one.
+function readTree(tree: Tree, reward: string, lengthSeconds: number): Map<string, bigint> {
   if (tree?.format !== TREE_FORMAT) throw new Error(`not a ${TREE_FORMAT} file`);
-  epochDayStart(tree.epoch);
+  parseEpochId(tree.epoch, lengthSeconds);
   if (normalizeAddress(tree.reward) !== reward) {
     throw new Error(`previous tree pays ${tree.reward}, this epoch pays ${reward}`);
   }
@@ -49,8 +51,10 @@ function readTree(tree: Tree, reward: string): Map<string, bigint> {
 
 // window: the { start, end } unix seconds this epoch's snapshots cover. It is stored in the tree
 // so the next epoch can prove it starts where this one ended.
-// allowGap: accept a previous tree that does not end where this epoch starts. Only for a day that
+// allowGap: accept a previous tree that does not end where this epoch starts. Only for an epoch that
 // can never be closed (no snapshots exist); the gap is visible in the tree as previousEpoch.
+// lengthSeconds: how long an epoch is, one day unless given. It decides the form of the ids and which
+// epoch is the one before (src/lib/epoch.ts); the tree itself records only the window.
 export function buildTree({
   epoch,
   window,
@@ -59,6 +63,7 @@ export function buildTree({
   previous = null,
   genesis = false,
   allowGap = false,
+  lengthSeconds = DAY,
 }: {
   epoch: string;
   window: EpochWindow;
@@ -67,8 +72,9 @@ export function buildTree({
   previous?: Tree | null;
   genesis?: boolean;
   allowGap?: boolean;
+  lengthSeconds?: number;
 }): Tree {
-  epochDayStart(epoch);
+  parseEpochId(epoch, lengthSeconds);
   if (!Number.isInteger(window?.start) || !Number.isInteger(window?.end) || window.end <= window.start) {
     throw new Error(`the epoch's window is required, got ${JSON.stringify(window)}`);
   }
@@ -76,15 +82,15 @@ export function buildTree({
   let before = new Map<string, bigint>();
   if (previous) {
     if (genesis) throw new Error("pass a previous tree or genesis, not both");
-    before = readTree(previous, reward);
+    before = readTree(previous, reward, lengthSeconds);
     if (!(previous.epoch < epoch)) {
       throw new Error(`previous tree is for ${previous.epoch}, which is not before ${epoch}`);
     }
-    const dayBefore = addDays(epoch, -1);
-    if (previous.epoch !== dayBefore && !allowGap) {
+    const epochBefore = addEpochs(epoch, -1, lengthSeconds);
+    if (previous.epoch !== epochBefore && !allowGap) {
       throw new Error(
-        `previous tree is for ${previous.epoch}, but the epoch before ${epoch} is ${dayBefore}; ` +
-          "building on an older tree drops the rewards of the days in between",
+        `previous tree is for ${previous.epoch}, but the epoch before ${epoch} is ${epochBefore}; ` +
+          `building on an older tree drops the rewards of the ${lengthSeconds === DAY ? "days" : "epochs"} in between`,
       );
     }
     // A changed start hour would count some hours in both epochs, or in neither.

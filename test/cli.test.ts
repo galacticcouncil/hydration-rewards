@@ -89,6 +89,28 @@ test("close-epoch refuses to replace an epoch that was closed with a different r
   assert.notEqual(readFileSync(join(dataDir, "trees", `${EPOCH}.json`), "utf8"), tree);
 });
 
+test("close-epoch refuses an epoch that ends after the program file's ends_at", () => {
+  const { dataDir, program, close } = setup();
+  // The file paid 2026-11-11 and ended where 2026-11-12 starts.
+  const ended = (end: string) =>
+    `${programText(2).replace("applies_from_epoch: 2026-11-12", "applies_from_epoch: 2026-11-11")}ends_at: ${end}\n`;
+  writeFileSync(program, ended("2026-11-12T14:00:00Z"));
+  const refused = close("--genesis");
+  assert.equal(refused.status, 1);
+  assert.match(
+    refused.err,
+    /^close-epoch: epoch 2026-11-12 ends at 2026-11-13T14:00:00\.000Z, after this program file's ends_at \(2026-11-12T14:00:00\.000Z\), and the file pays no epoch past its end/,
+  );
+  assert.equal(existsSync(join(dataDir, "trees")), false);
+  assert.equal(existsSync(join(dataDir, "epochs")), false);
+
+  // With an end a day later it is the last epoch the file pays, and closes like any other.
+  writeFileSync(program, ended("2026-11-13T14:00:00Z"));
+  const last = close("--genesis");
+  assert.equal(last.status, 0, last.err);
+  assert.match(last.out, /24 snapshots, 1 accounts paid, distributed 3000000, dust 0/);
+});
+
 test("close-epoch takes its settings from a program file only", () => {
   const { dataDir, close } = setup();
   const noProgram = run("close-epoch.ts", "--epoch", EPOCH, "--data", dataDir, "--genesis");

@@ -1,4 +1,4 @@
-// The calls of the cutover referendum (LAUNCH.md, "The referendum"), as the EVM calls Hydration's
+// The calls of the cutover referendum, as the EVM calls Hydration's
 // Aave manager account makes: the end of the old PRIME stream on each aToken, and the move of PRIME
 // from the old rewards pot to the distributor. This file only builds and checks them. A referendum
 // wraps each one in dispatcher.dispatchAsAaveManager(evm.call(...)) inside one utility.batchAll, with

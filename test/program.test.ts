@@ -65,6 +65,76 @@ test("the first epoch a program file pays is a decision: a real date, and requir
   }
 });
 
+test("the end of a program is optional: a UTC time on the hour that an epoch ends at, after the first epoch's start", () => {
+  const withEnd = (value: string, changes = {}) =>
+    parseProgram(program({ ends_at: `ends_at: ${value}`, ...changes }), config);
+  // Left out or left blank the program has no end, and closing an epoch asks for none.
+  for (const line of [null, "ends_at:"]) {
+    assert.equal(parseProgram(program({ ends_at: line }), config, { requireDecisions: true }).endsAt, null);
+  }
+  // 15 January 2027, 14:00 UTC, as unix seconds.
+  assert.equal(withEnd("2027-01-15T14:00:00Z").endsAt, 1_800_021_600);
+  assert.equal(withEnd("2027-01-15T14:00:00Z   # the stream's own end").endsAt, 1_800_021_600);
+
+  // One form only: no other zone and none left out, no date alone, no unix seconds, nothing off the
+  // hour, and no date or hour that does not exist.
+  for (const value of [
+    "2027-01-15T15:00:00+01:00",
+    "2027-01-15T14:00:00",
+    "2027-01-15 14:00:00Z",
+    "2027-01-15T14:00Z",
+    "2027-01-15",
+    "1800021600",
+    "2027-01-15T14:30:00Z",
+    "2027-01-15T14:00:01Z",
+    "2027-02-30T14:00:00Z",
+    "2027-01-15T24:00:00Z",
+  ]) {
+    assert.throws(() => withEnd(value), {
+      message: `program: ends_at must be a UTC time on the hour, written like 2027-01-15T14:00:00Z, got ${value}`,
+    });
+  }
+
+  // It is a moment an epoch ends at: the start hour's own hour, once that is decided.
+  assert.throws(
+    () => withEnd("2027-01-15T13:00:00Z"),
+    /ends_at must be a time an epoch ends at, and with epoch_start_hour_utc 14 epochs end at 14:00 UTC; got 2027-01-15T13:00:00Z/,
+  );
+  assert.throws(
+    () => withEnd("2027-01-15T14:00:00Z", { epoch_start_hour_utc: "epoch_start_hour_utc: 0" }),
+    /with epoch_start_hour_utc 0 epochs end at 00:00 UTC/,
+  );
+  assert.equal(
+    withEnd("2027-01-15T13:00:00Z", { epoch_start_hour_utc: "epoch_start_hour_utc:" }).endsAt,
+    1_800_018_000,
+  );
+
+  // The file pays at least one epoch: the end is after the start of applies_from_epoch, 2026-11-12 14:00.
+  assert.equal(withEnd("2026-11-13T14:00:00Z").endsAt, start + 86_400);
+  for (const value of ["2026-11-12T14:00:00Z", "2026-11-11T14:00:00Z"]) {
+    assert.throws(
+      () => withEnd(value),
+      new RegExp(
+        `ends_at ${value} is not after the start of applies_from_epoch 2026-11-12, so this file would pay no epoch`,
+      ),
+    );
+  }
+  // While the start hour is undecided the first epoch starts at midnight at the earliest.
+  const noHour = { epoch_start_hour_utc: null };
+  assert.throws(
+    () => withEnd("2026-11-12T00:00:00Z", noHour),
+    /is not after the start of applies_from_epoch 2026-11-12/,
+  );
+  assert.equal(withEnd("2026-11-12T01:00:00Z", noHour).endsAt, start - 13 * 3600);
+  // And without a first epoch there is nothing to compare it with yet.
+  assert.equal(withEnd("2026-11-11T14:00:00Z", { applies_from_epoch: "applies_from_epoch:" }).endsAt, start - 86_400);
+
+  assert.throws(
+    () => parseProgram(program({ ends_at: "ends_on: 2027-01-15T14:00:00Z" }), config),
+    /"ends_on" is not known\. Did you mean ends_at\?/,
+  );
+});
+
 test("a program file loads from any folder", () => {
   // The skill previews a saved copy of the old program from a temporary folder.
   const path = join(mkdtempSync(join(tmpdir(), "hydration-program-")), "before.yaml");
@@ -132,21 +202,32 @@ test("mistakes stop the run with a message a non-developer can act on", () => {
   );
 });
 
-test("HEURC earns next to HUSDC and HUSDT, with a budget of its own", () => {
-  const p = parseProgram(
-    program({
-      earn_on_supply_of: "earn_on_supply_of: [HUSDC, HUSDT, HEURC]",
-      budget_per_day: "budget_per_day:\n  HUSDC: 1\n  HUSDT: 1\n  HEURC: 2.5",
-    }),
-    config,
-    { requireDecisions: true },
-  );
-  assert.deepEqual(p.earn, ["HUSDC", "HUSDT", "HEURC"]);
-  assert.equal(p.budgetPerDay.get("HEURC"), 2_500_000n);
+test("each earning asset has a budget of its own", () => {
+  const p = parseProgram(program({ budget_per_day: "budget_per_day:\n  HUSDC: 1\n  HUSDT: 2.5" }), config, {
+    requireDecisions: true,
+  });
+  assert.deepEqual(p.earn, ["HUSDC", "HUSDT"]);
+  assert.equal(p.budgetPerDay.get("HUSDC"), 1_000_000n);
+  assert.equal(p.budgetPerDay.get("HUSDT"), 2_500_000n);
   // Earning without a budget line of its own is refused.
   assert.throws(
-    () => parseProgram(program({ earn_on_supply_of: "earn_on_supply_of: [HUSDC, HUSDT, HEURC]" }), config),
-    /no line for HEURC/,
+    () => parseProgram(program({ budget_per_day: "budget_per_day:\n  HUSDC: 1" }), config),
+    /no line for HUSDT/,
+  );
+});
+
+test("HEURC is not a supply asset in the mainnet config, so a program cannot earn on it", () => {
+  assert.equal(config.supplyAssets.HEURC, undefined);
+  assert.throws(
+    () =>
+      parseProgram(
+        program({
+          earn_on_supply_of: "earn_on_supply_of: [HUSDC, HUSDT, HEURC]",
+          budget_per_day: "budget_per_day:\n  HUSDC: 1\n  HUSDT: 1\n  HEURC: 1",
+        }),
+        config,
+      ),
+    /asset "HEURC" is not known/,
   );
 });
 
@@ -191,4 +272,39 @@ test("the preview reports eligible value and what the HOLLAR rule removed", () =
     previewProgram(half, snapshots, { denylist, reward: config.reward }).text,
     /budget_per_day is blank for HUSDT, so no amounts are shown/,
   );
+});
+
+test("for a program with an end, the preview adds up what it pays from its first epoch to the end", () => {
+  const snapshots = hourly(start, () => ({ [ACCOUNTS.a]: { husdt: 100 } }));
+  const denylist = makeDenylist({ rules: { palletAccounts: true }, addresses: [] });
+  const text = (changes = {}) =>
+    previewProgram(parseProgram(program(changes), config), snapshots, { denylist, reward: config.reward }).text;
+
+  // 64 epochs from 12 November 2026 to 15 January 2027, at 275.616 and 0.5 PRIME a day: what a funding
+  // referendum has to move, to the last unit.
+  const ends = {
+    ends_at: "ends_at: 2027-01-15T14:00:00Z",
+    budget_per_day: "budget_per_day:\n  HUSDC: 275.616\n  HUSDT: 0.5",
+  };
+  assert.match(
+    text(ends),
+    /^Until ends_at it pays 64 epochs, from 2026-11-12: HUSDC 17639\.424, HUSDT 32, 17671\.424 PRIME in all$/m,
+  );
+  assert.match(
+    text({
+      ends_at: "ends_at: 2026-11-13T14:00:00Z",
+      budget_per_day: "budget_per_day:\n  HUSDC: 0.000001\n  HUSDT: 1",
+    }),
+    /^Until ends_at it pays 1 epoch, from 2026-11-12: HUSDC 0\.000001, HUSDT 1, 1\.000001 PRIME in all$/m,
+  );
+
+  // Only with an end, a first epoch, a start hour and every budget.
+  for (const changes of [
+    {},
+    { ...ends, applies_from_epoch: "applies_from_epoch:" },
+    { ...ends, epoch_start_hour_utc: "epoch_start_hour_utc:" },
+    { ...ends, budget_per_day: "budget_per_day:\n  HUSDC: 275.616\n  HUSDT:" },
+  ]) {
+    assert.doesNotMatch(text(changes), /Until ends_at/);
+  }
 });

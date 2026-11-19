@@ -8,8 +8,9 @@ import { StandardMerkleTree } from "@openzeppelin/merkle-tree";
 import { closeEpochToDisk, epochWindow } from "../src/close-epoch.ts";
 import { loadDenylist, makeDenylist } from "../src/lib/denylist.ts";
 import { parseProgram } from "../src/program.ts";
+import { toJson } from "../src/lib/io.ts";
 import { claimsPath, latestFile, latestPath, publishLatest } from "../src/publish.ts";
-import type { ClaimsFile, Config } from "../src/types.ts";
+import type { ClaimsFile, Config, LatestFile, OpenEpoch } from "../src/types.ts";
 import { ACCOUNTS, hourly, makeDataDir, makeSnapshot } from "./helpers.ts";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -26,6 +27,17 @@ max_hollar_debt_usd: 5
 const program = parseProgram(programText("  HUSDC: 1\n  HUSDT: 1"), config, { requireDecisions: true });
 const denylist = makeDenylist({ rules: { palletAccounts: true }, addresses: [] });
 const start = (epoch: string) => epochWindow(epoch, 14).start;
+// The open epoch as the runner works it out (src/accruing.ts). LEFT supplied earlier in the epoch and
+// is in no snapshot any more.
+const LEFT = "0x00000000000000000000000000000000000000e5";
+const openEpoch: OpenEpoch = {
+  id: "2027-01-16",
+  start: 1_800_000_000,
+  end: 1_800_086_400,
+  snapshots: 2,
+  expectedSnapshots: 24,
+  accruing: { [ACCOUNTS.a]: "83332", [LEFT]: "5" },
+};
 
 test("the status file says who is earning, who is not and why", () => {
   const snapshot = makeSnapshot({
@@ -45,6 +57,7 @@ test("the status file says who is earning, who is not and why", () => {
     reward: config.reward,
     denylist,
     latestTree: { epoch: "2027-01-15", root: `0x${"ab".repeat(32)}` },
+    openEpoch,
   });
 
   assert.equal(latest.format, "hydration-rewards-latest/1");
@@ -68,20 +81,107 @@ test("the status file says who is earning, who is not and why", () => {
   assert.deepEqual(latest.latestTree, { epoch: "2027-01-15", root: `0x${"ab".repeat(32)}` });
 
   const undecided = parseProgram(programText("  HUSDC:\n  HUSDT:"), config);
-  const blank = latestFile({ snapshot, program: undecided, reward: config.reward, denylist, latestTree: null });
+  const blank = latestFile({
+    snapshot,
+    program: undecided,
+    reward: config.reward,
+    denylist,
+    latestTree: null,
+    openEpoch: { ...openEpoch, accruing: null },
+  });
   assert.equal(blank.assets.HUSDT.budgetPerDay, null);
   assert.equal(blank.latestTree, null);
+  assert.equal(blank.openEpoch?.accruing, null);
+});
+
+test("the status file carries the open epoch as an addition that older apps pass over", () => {
+  const snapshot = makeSnapshot({
+    number: 77,
+    timestamp: 1_800_003_602,
+    target: 1_800_003_600,
+    accounts: { [ACCOUNTS.a]: { husdt: 100 }, [ACCOUNTS.b]: { husdc: 300, hollar: 40 } },
+  });
+  const latest = latestFile({ snapshot, program, reward: config.reward, denylist, latestTree: null, openEpoch });
+
+  // Written as the runner gave it, after every field an app built before it reads; the format name stays.
+  assert.deepEqual(latest.openEpoch, openEpoch);
+  assert.deepEqual(Object.keys(latest), [
+    "format",
+    "asOf",
+    "reward",
+    "program",
+    "assets",
+    "accounts",
+    "latestTree",
+    "openEpoch",
+  ]);
+  assert.equal(latest.format, "hydration-rewards-latest/1");
+  // The estimate is a map of its own. `accounts` still lists only who supplied at this snapshot, with
+  // the fields it had: an account that left has an estimate and no entry, a borrower an entry and no estimate.
+  assert.deepEqual(latest.accounts, {
+    [ACCOUNTS.a]: { earning: true, hollarDebtUsd: "0.00" },
+    [ACCOUNTS.b]: { earning: false, reason: "hollar_debt", hollarDebtUsd: "40.00" },
+  });
+  assert.deepEqual(Object.keys(latest.openEpoch?.accruing ?? {}), [ACCOUNTS.a, LEFT]);
+
+  // A file written before the estimate existed has no openEpoch, and is still a LatestFile to its reader.
+  const { openEpoch: _, ...before } = latest;
+  const old: LatestFile = before;
+  assert.equal(old.openEpoch, undefined);
+});
+
+test("the status file names the end of a program that has one, and says when no epoch is open any more", () => {
+  const snapshot = makeSnapshot({
+    number: 77,
+    timestamp: 1_800_018_002,
+    target: 1_800_018_000,
+    accounts: { [ACCOUNTS.a]: { husdt: 100 } },
+  });
+  const ending = parseProgram(`${programText("  HUSDC: 1\n  HUSDT: 1")}ends_at: 2027-01-15T14:00:00Z\n`, config, {
+    requireDecisions: true,
+  });
+  const latestTree = { epoch: "2027-01-14", root: `0x${"ab".repeat(32)}` };
+  const settings = { snapshot, reward: config.reward, denylist, latestTree };
+
+  // The end is one more field of `program`, in unix seconds, and only there when the program has one.
+  const open = latestFile({ ...settings, program: ending, openEpoch });
+  assert.deepEqual(open.program, {
+    name: "publish test",
+    sha256: ending.sha256,
+    maxHollarDebtUsd: "5.00",
+    endsAt: 1_800_021_600,
+  });
+  assert.deepEqual(open.openEpoch, openEpoch);
+  assert.equal("endsAt" in latestFile({ ...settings, program, openEpoch }).program, false);
+
+  // After the end no epoch is open: the key is written, with null, which a file from before the
+  // estimate (no key at all) cannot be taken for. Everything else is as it was.
+  const ended = latestFile({ ...settings, program: ending, openEpoch: null });
+  const { dataDir } = makeDataDir({ snapshots: [] });
+  publishLatest(dataDir, ended);
+  const written = readFileSync(latestPath(dataDir), "utf8");
+  assert.match(written, /^  "openEpoch": null\n}\n$/m);
+  assert.deepEqual(JSON.parse(written), { ...JSON.parse(toJson(open)), openEpoch: null });
+  assert.deepEqual(Object.keys(JSON.parse(written)), Object.keys(open));
 });
 
 test("the status file is only rewritten when it changes", () => {
   const { dataDir } = makeDataDir({ snapshots: [] });
   const snapshot = makeSnapshot({ number: 1, timestamp: 3_600, accounts: { [ACCOUNTS.a]: { husdt: 100 } } });
-  const latest = latestFile({ snapshot, program, reward: config.reward, denylist, latestTree: null });
+  const latest = latestFile({ snapshot, program, reward: config.reward, denylist, latestTree: null, openEpoch });
   assert.equal(publishLatest(dataDir, latest), true);
   const written = statSync(latestPath(dataDir)).mtimeMs;
   assert.equal(publishLatest(dataDir, latest), false);
   assert.equal(statSync(latestPath(dataDir)).mtimeMs, written);
   assert.equal(publishLatest(dataDir, { ...latest, latestTree: { epoch: "2027-01-15", root: "0x01" } }), true);
+
+  // The open epoch moving on is a change too. An estimate that could not be made is written as null,
+  // and an epoch without a snapshot as an empty map: the keys are always there.
+  const published = (): LatestFile => JSON.parse(readFileSync(latestPath(dataDir), "utf8"));
+  assert.equal(publishLatest(dataDir, { ...latest, openEpoch: { ...openEpoch, snapshots: 3, accruing: null } }), true);
+  assert.deepEqual(published().openEpoch, { ...openEpoch, snapshots: 3, accruing: null });
+  assert.equal(publishLatest(dataDir, { ...latest, openEpoch: { ...openEpoch, snapshots: 0, accruing: {} } }), true);
+  assert.deepEqual(published().openEpoch, { ...openEpoch, snapshots: 0, accruing: {} });
 });
 
 // One closed epoch on disk, the way the runner and the close command leave it.

@@ -1,15 +1,18 @@
 #!/usr/bin/env node
-// Closes one daily epoch: stored snapshots -> eligible sums -> PRIME per account -> epochs/<epoch>.csv
+// Closes one epoch: stored snapshots -> eligible sums -> PRIME per account -> epochs/<epoch>.csv
 // -> cumulative tree (src/build-tree.ts) on top of the previous epoch's tree.
 //
 // Every setting comes from the program file (programs/README.md): budgets, start hour, earning
-// assets, the HOLLAR allowance, and the first epoch the file applies to.
+// assets, the HOLLAR allowance, and the first epoch the file applies to. A file with an end (ends_at)
+// closes no epoch that ends after it. How long an epoch is comes from the config
+// (epoch.lengthSeconds, one day unless set), and with it the form of an epoch's id: a date for
+// one-day epochs, the date and hour it starts at (2026-11-17T03) for shorter ones.
 //
 // Usage:
 //   node src/close-epoch.ts --epoch 2026-11-12 --program programs/htoken-no-hollar-borrowers.yaml \
 //     (--prev data/trees/2026-11-11.json | --genesis)
 //   --allow-partial   close with fewer than the expected snapshots (the full budget is still paid)
-//   --allow-gap       build on a tree older than the day before (a day that could never be closed)
+//   --allow-gap       build on a tree older than the epoch before (an epoch that could never be closed)
 //   --overwrite       replace outputs of an earlier close that differ from this one; refused once a
 //                     later epoch has been closed, because that epoch's tree builds on these outputs
 
@@ -19,7 +22,7 @@ import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 import { buildTree } from "./build-tree.ts";
 import { compareAddresses } from "./lib/accounts.ts";
-import { addDays, epochDayStart } from "./lib/epoch.ts";
+import { addEpochs, DAY, epochIdShape, epochIdShapeFor, epochLength, epochStart, parseEpochId } from "./lib/epoch.ts";
 import { usdExact } from "./lib/format.ts";
 import { messageOf, readJson, sha256, toJson, writeText } from "./lib/io.ts";
 import { allocate } from "./allocate.ts";
@@ -31,7 +34,6 @@ import { claimsFile, claimsPath } from "./publish.ts";
 import type { Config, EpochWindow, LoadedDenylist, Program, Snapshot, Tree } from "./types.ts";
 
 const EPOCH_SUMMARY_FORMAT = "hydration-rewards-epoch/1";
-const DAY = 86_400;
 
 // The epoch CSV: `account,amount`, amounts in raw reward-token units (PRIME has 6 decimals).
 // Rows are sorted by account and zero amounts are left out, so the same allocation always
@@ -43,13 +45,10 @@ export function formatEpochCsv(amounts: Map<string, bigint>): string {
   return out;
 }
 
-export function epochWindow(epoch: string, startHourUtc: number | null | undefined): EpochWindow {
-  const day = epochDayStart(epoch);
-  if (typeof startHourUtc !== "number" || !Number.isInteger(startHourUtc) || startHourUtc < 0 || startHourUtc > 23) {
-    throw new Error("the epoch start hour (UTC, 0-23) is required and has no default");
-  }
-  const start = day / 1000 + startHourUtc * 3600;
-  return { start, end: start + DAY };
+// The window of an epoch of the given length, one day unless said otherwise (src/lib/epoch.ts).
+export function epochWindow(epoch: string, startHourUtc: number | null | undefined, lengthSeconds = DAY): EpochWindow {
+  const start = epochStart(epoch, startHourUtc, lengthSeconds);
+  return { start, end: start + lengthSeconds };
 }
 
 // Loads the epoch's snapshots: one per evenly spaced hour, each taken at the block of its hour that
@@ -75,7 +74,7 @@ export function loadEpochSnapshots({
   expected: number;
   allowPartial?: boolean;
 }): LoadedSnapshot[] {
-  const interval = DAY / expected;
+  const interval = (window.end - window.start) / expected;
   const snapshots: LoadedSnapshot[] = [];
   const missing: string[] = [];
   for (let k = 0; k < expected; k++) {
@@ -124,6 +123,8 @@ export interface CloseEpochInput {
   previousTreePath?: string | null;
   genesis?: boolean;
   allowGap?: boolean;
+  // One day and 24 snapshots unless given; an epoch of another length needs both.
+  lengthSeconds?: number;
   expectedSnapshots?: number;
   allowPartial?: boolean;
 }
@@ -131,9 +132,9 @@ export interface CloseEpochInput {
 // The tree an epoch builds on must be the one stored for its epoch, and that tree must itself build on
 // the tree stored before it. A tree passed in from elsewhere, or one whose predecessor was closed again
 // after it was built, would fork the chain: the new tree would carry amounts no stored tree agrees with.
-function checkStoredChain(dataDir: string, previous: Tree): void {
+function checkStoredChain(dataDir: string, previous: Tree, lengthSeconds: number): void {
   const storedRoot = (epoch: string): string | null => {
-    epochDayStart(epoch); // a date, before it becomes part of a path
+    parseEpochId(epoch, lengthSeconds); // an id of this epoch length, before it becomes part of a path
     const path = join(dataDir, "trees", `${epoch}.json`);
     return existsSync(path) ? readJson<Tree>(path).root : null;
   };
@@ -172,10 +173,11 @@ export function closeEpoch({
   previousTreePath = null,
   genesis = false,
   allowGap = false,
+  lengthSeconds = DAY,
   expectedSnapshots = 24,
   allowPartial = false,
 }: CloseEpochInput) {
-  const window = epochWindow(epoch, startHourUtc);
+  const window = epochWindow(epoch, startHourUtc, lengthSeconds);
   const loaded = loadEpochSnapshots({
     dir: join(dataDir, "snapshots"),
     epoch,
@@ -200,8 +202,8 @@ export function closeEpoch({
 
   const csv = formatEpochCsv(amounts);
   const previous = previousTreePath ? readJson<Tree>(previousTreePath) : null;
-  if (previous) checkStoredChain(dataDir, previous);
-  const tree = buildTree({ epoch, window, reward, epochAmounts: amounts, previous, genesis, allowGap });
+  if (previous) checkStoredChain(dataDir, previous, lengthSeconds);
+  const tree = buildTree({ epoch, window, reward, epochAmounts: amounts, previous, genesis, allowGap, lengthSeconds });
 
   const summary = {
     format: EPOCH_SUMMARY_FORMAT,
@@ -271,20 +273,33 @@ export function writeOutputs(
   for (const [path, text] of outputs) writeText(path, text);
 }
 
-// Epochs that have a stored tree, oldest first.
-export function storedTreeEpochs(dataDir: string): string[] {
+// Epochs that have a stored tree, oldest first. A tree named in the other form of id was closed with
+// another epoch length. Leaving it out would make its chain invisible: a --genesis close or a runner
+// started here would begin a second chain beside it, without the amounts it holds. So it is refused.
+export function storedTreeEpochs(dataDir: string, lengthSeconds = DAY): string[] {
   const dir = join(dataDir, "trees");
   if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .filter((f) => /^\d{4}-\d{2}-\d{2}\.json$/.test(f))
-    .map((f) => f.slice(0, 10))
-    .sort();
+  const epochs: string[] = [];
+  for (const file of readdirSync(dir)) {
+    const epoch = file.endsWith(".json") ? file.slice(0, -".json".length) : "";
+    const shape = epochIdShape(epoch);
+    if (shape === null) continue;
+    if (shape !== epochIdShapeFor(lengthSeconds)) {
+      throw new Error(
+        `${join(dir, file)} is the tree of ${shape === "day" ? "a one-day epoch" : "an epoch shorter than a day"}, but ` +
+          `epochs are ${lengthSeconds} seconds long here (epoch.lengthSeconds in the config); a chain of trees keeps ` +
+          "one epoch length, so use the config these trees were closed with, or a data directory of its own",
+      );
+    }
+    epochs.push(epoch);
+  }
+  return epochs.sort();
 }
 
 // Where this epoch's tree goes in the stored chain, checked before anything is written.
 // - It must build on the newest stored tree before it, or start the chain (--genesis) only when there
-//   is none: a --genesis or --allow-gap close past a stored tree would leave that closed day out of
-//   every later tree. --allow-gap is for days that have no tree.
+//   is none: a --genesis or --allow-gap close past a stored tree would leave that closed epoch out of
+//   every later tree. --allow-gap is for epochs that have no tree.
 // - Every later tree was built on this epoch's tree as it is stored. Closing this epoch again with a
 //   different result, or for the first time once a later epoch is closed, would leave those trees on a
 //   version of it that no longer exists, and every close after them would carry that version forward.
@@ -294,16 +309,18 @@ function checkPlaceInChain(
   previousEpoch: string | null,
   treePath: string,
   treeText: string,
+  lengthSeconds: number,
 ): void {
-  const stored = storedTreeEpochs(dataDir);
+  const stored = storedTreeEpochs(dataDir, lengthSeconds);
   const earlier = stored.filter((e) => e < epoch);
   const newest = earlier.length > 0 ? earlier[earlier.length - 1] : null;
   if (newest !== previousEpoch) {
+    const days = lengthSeconds === DAY ? "days" : "epochs";
     throw new Error(
       previousEpoch === null
         ? `${newest} is already closed, so ${epoch} cannot start a new chain (--genesis): it builds on ${newest}'s tree`
         : `${epoch} would build on ${previousEpoch}, but ${newest} is closed after it, and building on an older tree ` +
-            "drops the closed days in between; --allow-gap is only for days that have no tree",
+            `drops the closed ${days} in between; --allow-gap is only for ${days} that have no tree`,
     );
   }
   const later = stored.filter((e) => e > epoch);
@@ -330,10 +347,11 @@ export function programProblem(
   epoch: string,
   program: Program,
   previousEpoch: string | null,
+  lengthSeconds = DAY,
 ): string | null {
   const from = program.appliesFromEpoch;
   if (from === null) return "applies_from_epoch is blank; write the first epoch this file pays";
-  const stored = storedTreeEpochs(dataDir);
+  const stored = storedTreeEpochs(dataDir, lengthSeconds);
   if (epoch < from) {
     if (!stored.some((e) => e < epoch)) {
       return (
@@ -347,7 +365,7 @@ export function programProblem(
     );
   }
   if (previousEpoch === null || previousEpoch < from) return null;
-  epochDayStart(previousEpoch); // a date, before it becomes part of a path
+  parseEpochId(previousEpoch, lengthSeconds); // an id of this epoch length, before it becomes part of a path
   const path = join(dataDir, "epochs", `${previousEpoch}.summary.json`);
   const recorded = existsSync(path)
     ? readJson<{ program?: { sha256?: string; appliesFromEpoch?: string | null } | null }>(path).program
@@ -360,7 +378,7 @@ export function programProblem(
       `${recorded.appliesFromEpoch}) than this one (applies from ${from}); restart the runner with that file`
     );
   }
-  const notClosed = stored.length > 0 ? addDays(stored[stored.length - 1], 1) : epoch;
+  const notClosed = stored.length > 0 ? addEpochs(stored[stored.length - 1], 1, lengthSeconds) : epoch;
   return (
     `epoch ${previousEpoch} was closed with ${recorded?.sha256 ? `another program file (${recorded.sha256})` : "no recorded program file"}, ` +
     `but this one applies from ${from}, so it should have closed ${previousEpoch} too. If no root from ${from} ` +
@@ -370,8 +388,14 @@ export function programProblem(
   );
 }
 
-function checkProgramApplies(dataDir: string, epoch: string, program: Program, previousEpoch: string | null): void {
-  const problem = programProblem(dataDir, epoch, program, previousEpoch);
+function checkProgramApplies(
+  dataDir: string,
+  epoch: string,
+  program: Program,
+  previousEpoch: string | null,
+  lengthSeconds: number,
+): void {
+  const problem = programProblem(dataDir, epoch, program, previousEpoch, lengthSeconds);
   if (problem !== null) throw new Error(problem);
 }
 
@@ -396,19 +420,33 @@ export function closeEpochToDisk({
   overwrite?: boolean;
   now?: number;
 } & Pick<CloseEpochInput, "previousTreePath" | "genesis" | "allowGap" | "allowPartial">) {
-  epochDayStart(epoch);
+  // The config says how long an epoch is, and so which form of id names one: a date given for a
+  // shorter epoch, or a date and hour given for a one-day epoch, stops here.
+  const lengthSeconds = epochLength(config);
+  parseEpochId(epoch, lengthSeconds);
   // A program loaded for closing has no blank budgets; this turns that promise into a check.
+  // The budget is per day, and an epoch pays its share of the day, rounded down to a whole unit:
+  // all of it when epochs are one day long.
   const budgets = new Map<string, bigint>();
   for (const [asset, budget] of program.budgetPerDay) {
     if (budget === null) throw new Error(`budget_per_day for ${asset} is blank; fill it in before closing an epoch`);
-    budgets.set(asset, budget);
+    budgets.set(asset, (budget * BigInt(lengthSeconds)) / BigInt(DAY));
   }
-  checkProgramApplies(dataDir, epoch, program, null); // an epoch before the program's first one fails here
+  // an epoch before the program's first one fails here
+  checkProgramApplies(dataDir, epoch, program, null, lengthSeconds);
+  const { end } = epochWindow(epoch, program.startHourUtc, lengthSeconds);
+  // A program file with an end (ends_at) pays the epoch that ends then in full, and no epoch after it.
+  if (program.endsAt !== null && end > program.endsAt) {
+    throw new Error(
+      `epoch ${epoch} ends at ${new Date(end * 1000).toISOString()}, after this program file's ends_at ` +
+        `(${new Date(program.endsAt * 1000).toISOString()}), and the file pays no epoch past its end; ` +
+        "a later epoch is closed with a new program file, whose applies_from_epoch is the epoch that starts at ends_at",
+    );
+  }
   // With hours missing, the whole budget is paid on the hours that are there: before the epoch has
-  // ended that would pay a day's budget on part of a day, and the rest of its hours would never count.
-  // Its last hour is only taken once it is over, so wait one hour past the end.
-  const { end } = epochWindow(epoch, program.startHourUtc);
-  const allowedFrom = end + DAY / config.epoch.snapshotsPerEpoch;
+  // ended that would pay an epoch's budget on part of an epoch, and the rest of its hours would never
+  // count. Its last hour is only taken once it is over, so wait one snapshot interval past the end.
+  const allowedFrom = end + lengthSeconds / config.epoch.snapshotsPerEpoch;
   if (options.allowPartial && now < allowedFrom) {
     throw new Error(
       `epoch ${epoch} ends at ${new Date(end * 1000).toISOString()} and its last hour is taken just after; ` +
@@ -419,19 +457,20 @@ export function closeEpochToDisk({
     dataDir,
     epoch,
     startHourUtc: program.startHourUtc,
-    budgets, // epochs are one day long
+    budgets,
     maxHollarDebt: program.maxHollarDebt,
     earn: program.earn,
     reward: config.reward.address,
     denylist,
     program: { name: program.name, sha256: program.sha256, appliesFromEpoch: program.appliesFromEpoch },
+    lengthSeconds,
     expectedSnapshots: config.epoch.snapshotsPerEpoch,
     ...options,
   });
-  checkProgramApplies(dataDir, epoch, program, tree.previousEpoch);
+  checkProgramApplies(dataDir, epoch, program, tree.previousEpoch, lengthSeconds);
   const treePath = join(dataDir, "trees", `${epoch}.json`);
   const treeText = toJson(tree);
-  checkPlaceInChain(dataDir, epoch, tree.previousEpoch, treePath, treeText);
+  checkPlaceInChain(dataDir, epoch, tree.previousEpoch, treePath, treeText, lengthSeconds);
   // The claims file goes first: it depends only on the tree and is named after its root, so if a close
   // stops after it, the leftover is never fetched. The tree goes last: the runner takes it as the sign
   // that the epoch is closed, so a close cut off before it is done again and writes the same bytes.

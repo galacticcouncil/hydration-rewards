@@ -29,7 +29,9 @@ export interface Config {
   rpc: string;
   rpcBatchSize?: number;
   reward: RewardConfig;
-  epoch: { snapshotsPerEpoch: number };
+  // lengthSeconds: how long an epoch is, one day (86400) when left out. A whole number of hours that
+  // divides a day, split evenly by snapshotsPerEpoch (src/lib/epoch.ts). Read it with epochLength.
+  epoch: { snapshotsPerEpoch: number; lengthSeconds?: number };
   markets: Record<string, { poolAddressesProvider: string }>;
   supplyAssets: Record<string, SupplyAssetConfig>;
   debtAssets: Record<string, DebtAssetConfig>;
@@ -90,10 +92,16 @@ export interface Snapshot {
 export interface Program {
   name: string;
   earn: string[];
+  // per day whatever the epoch length; a close scales it to the length of its epoch
   budgetPerDay: Map<string, bigint | null>;
+  // the hour a one-day epoch starts at; shorter epochs start a whole number of epochs away from it
   startHourUtc: number | null;
-  // the first epoch this file pays (applies_from_epoch); a close of any other epoch checks it
+  // the first epoch this file pays (applies_from_epoch), an id in the form of the configured epoch
+  // length; a close of any other epoch checks it
   appliesFromEpoch: string | null;
+  // the moment the program ends (ends_at), in unix seconds: the last epoch this file pays is the one
+  // that ends then. null when it has no end.
+  endsAt: number | null;
   maxHollarDebt: bigint;
   sha256: string;
 }
@@ -167,17 +175,38 @@ export interface AccountStatus {
   hollarDebtUsd?: string;
 }
 
+// The epoch still open, in data/public/latest.json: the first one without a tree, and an estimate of
+// what each account has earned in it so far (src/accruing.ts).
+export interface OpenEpoch {
+  // a label only: readers take the window from start and end, never from the id
+  id: string;
+  // the epoch's window, in unix seconds
+  start: number;
+  end: number;
+  // how many of the epoch's snapshots exist, and how many a full epoch has
+  snapshots: number;
+  expectedSnapshots: number;
+  // account -> raw reward units earned so far; accounts with nothing are left out, so it is {} while the
+  // epoch has no snapshot. null when no estimate can be made: a budget is undecided, a newer program
+  // file waits to pay this epoch, or it failed.
+  accruing: Record<string, string> | null;
+}
+
 // data/public/latest.json: who is earning as of the most recent snapshot, and what the app needs
 // to show a rate. Amounts are strings; reward amounts are raw units, dollars have two decimals.
 export interface LatestFile {
   format: string;
   asOf: { hour: number; block: number; blockTime: number };
   reward: { symbol: string; address: string; decimals: number };
-  program: { name: string; sha256: string; maxHollarDebtUsd: string };
+  // endsAt: the moment the program ends, in unix seconds; left out when it has no end
+  program: { name: string; sha256: string; maxHollarDebtUsd: string; endsAt?: number };
   // per earning asset: the daily budget (null while undecided) and the value it is shared over
   assets: Record<string, { budgetPerDay: string | null; eligibleUsd: string }>;
   // every account that supplied an earning asset at the snapshot
   accounts: Record<string, AccountStatus>;
   // the newest closed epoch; its tree is trees/<root>.json. The root may not be on chain yet.
   latestTree: { epoch: string; root: string } | null;
+  // the epoch after it; null once the program has ended, when no epoch is open any more. Not in a
+  // file written before the estimate existed, so readers treat it as optional.
+  openEpoch?: OpenEpoch | null;
 }

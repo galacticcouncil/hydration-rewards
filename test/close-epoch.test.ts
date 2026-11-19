@@ -501,6 +501,48 @@ test("--allow-partial waits until an hour after the epoch ends, when its last ho
   assert.equal(partial(end + 3600).summary.snapshots.length, 7);
 });
 
+test("a program file with an end closes the epoch that ends then in full, and no epoch after it", () => {
+  const { dataDir, denylistPath } = threeDays();
+  const text = (from: string, end: string) =>
+    `name: t\napplies_from_epoch: ${from}\n${end}budget_per_day:\n  HUSDC: 1\n  HUSDT: 1\n` +
+    "epoch_start_hour_utc: 14\nearn_on_supply_of: [HUSDC, HUSDT]\nmax_hollar_debt_usd: 5\n";
+  // It pays 2026-11-12 and 2026-11-13.
+  const ending = parseProgram(text("2026-11-12", "ends_at: 2026-11-14T14:00:00Z\n"), config, {
+    requireDecisions: true,
+  });
+  const toDisk = (epoch: string, extra: Partial<Parameters<typeof closeEpochToDisk>[0]> = {}) =>
+    closeEpochToDisk({ dataDir, epoch, program: ending, config, denylist: loadDenylist(denylistPath), ...extra });
+  const treeOf = (epoch: string) => join(dataDir, "trees", `${epoch}.json`);
+  toDisk("2026-11-12", { genesis: true });
+  assert.equal(toDisk("2026-11-13", { previousTreePath: treeOf("2026-11-12") }).summary.distributed, "1000000");
+
+  // The epoch after the end is refused however it is asked for, and so is a later one.
+  const previousTreePath = treeOf("2026-11-13");
+  for (const extra of [
+    { previousTreePath },
+    { previousTreePath, overwrite: true },
+    { previousTreePath, allowPartial: true, now: start + 30 * 86_400 },
+    { previousTreePath: treeOf("2026-11-12"), allowGap: true },
+  ]) {
+    assert.throws(
+      () => toDisk("2026-11-14", extra),
+      /^Error: epoch 2026-11-14 ends at 2026-11-15T14:00:00\.000Z, after this program file's ends_at \(2026-11-14T14:00:00\.000Z\), and the file pays no epoch past its end; a later epoch is closed with a new program file, whose applies_from_epoch is the epoch that starts at ends_at$/,
+    );
+  }
+  assert.throws(
+    () => toDisk("2026-11-15", { previousTreePath, allowGap: true }),
+    /epoch 2026-11-15 ends at 2026-11-16T14:00:00\.000Z, after this program file's ends_at/,
+  );
+  for (const file of [treeOf("2026-11-14"), join(dataDir, "epochs", "2026-11-14.csv"), treeOf("2026-11-15")]) {
+    assert.equal(existsSync(file), false, file);
+  }
+
+  // The file that continues, which applies from the epoch that starts at that end, closes it.
+  const next = parseProgram(text("2026-11-14", ""), config, { requireDecisions: true });
+  const { tree } = toDisk("2026-11-14", { program: next, previousTreePath });
+  assert.equal(tree.claims[ACCOUNTS.a].claimable, "3000000");
+});
+
 test("leftovers of a close that stopped before its tree are not replaced silently, and the refusal says why", () => {
   // An earlier close of 2026-11-12, with other budgets, wrote its CSV and summary and stopped before
   // its tree. (A tree removed by hand after its root was posted looks the same, so nothing is replaced

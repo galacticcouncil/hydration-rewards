@@ -4,13 +4,14 @@
 
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
-import { epochDayStart } from "./lib/epoch.ts";
-import { sha256 } from "./lib/io.ts";
+import { DAY, epochLength, epochStart, parseEpochId } from "./lib/epoch.ts";
+import { messageOf, sha256 } from "./lib/io.ts";
 import type { Config, Program } from "./types.ts";
 
 const PROGRAM_KEYS = [
   "name",
   "applies_from_epoch",
+  "ends_at",
   "budget_per_day",
   "epoch_start_hour_utc",
   "earn_on_supply_of",
@@ -18,6 +19,8 @@ const PROGRAM_KEYS = [
 ];
 // Undecided settings may be left out as well as left blank; closing an epoch needs them all.
 const DECISIONS = ["applies_from_epoch", "epoch_start_hour_utc"];
+// May be left out or left blank for good: a program without ends_at has no end.
+const OPTIONAL = ["ends_at"];
 
 function distance(a: string, b: string): number {
   const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
@@ -48,7 +51,7 @@ export function toRawUnits(text: unknown, decimals: number, where: string): bigi
   return BigInt(m[1]) * 10n ** BigInt(decimals) + BigInt(fraction.padEnd(decimals, "0") || "0");
 }
 
-// text: the file's contents. config: config/mainnet.json. Returns a checked program.
+// text: the file's contents. config: config/mainnet.json, or the config of the run. Returns a checked program.
 // With requireDecisions, a blank budget, start hour or first epoch is an error (closing an epoch);
 // without it they come back as null (previewing).
 export function parseProgram(
@@ -64,7 +67,8 @@ export function parseProgram(
   for (const key of Object.keys(doc))
     if (!PROGRAM_KEYS.includes(key)) throw notKnown(`${source}: setting`, key, PROGRAM_KEYS);
   for (const key of PROGRAM_KEYS) {
-    if (!(key in doc) && !DECISIONS.includes(key)) throw new Error(`${source}: "${key}" is missing`);
+    if (!(key in doc) && !DECISIONS.includes(key) && !OPTIONAL.includes(key))
+      throw new Error(`${source}: "${key}" is missing`);
   }
 
   const supplyAssets = Object.keys(config.supplyAssets);
@@ -112,18 +116,72 @@ export function parseProgram(
 
   // The first epoch this file pays. A close of an earlier epoch with it is refused, and so is a close
   // after it that does not follow one made with this same file (src/close-epoch.ts).
+  // It is an id of an epoch of the configured length (src/lib/epoch.ts): a date for one-day epochs,
+  // and for shorter ones a date and hour, which must be an hour an epoch starts at once the start
+  // hour is decided.
   let appliesFromEpoch: string | null = null;
   if (!blank(doc.applies_from_epoch)) {
     appliesFromEpoch = String(doc.applies_from_epoch);
+    const lengthSeconds = epochLength(config);
     try {
-      epochDayStart(appliesFromEpoch);
-    } catch {
-      throw new Error(`${source}: applies_from_epoch must be a date like 2027-01-15, got ${appliesFromEpoch}`);
+      if (startHourUtc === null) parseEpochId(appliesFromEpoch, lengthSeconds);
+      else epochStart(appliesFromEpoch, startHourUtc, lengthSeconds);
+    } catch (error) {
+      throw new Error(
+        lengthSeconds === DAY
+          ? `${source}: applies_from_epoch must be a date like 2027-01-15, got ${appliesFromEpoch}`
+          : `${source}: applies_from_epoch: ${messageOf(error)}`,
+      );
     }
   } else if (requireDecisions) {
     throw new Error(
       `${source}: applies_from_epoch is blank; write the first epoch this file pays before closing an epoch`,
     );
+  }
+
+  // The moment the program ends, if it has an end: the last epoch this file pays is the one that ends
+  // then, and no later epoch is closed with it (src/close-epoch.ts). Text in one form only, a UTC time
+  // on the hour, so that no time zone or half hour is read into it.
+  let endsAt: number | null = null;
+  if (!blank(doc.ends_at)) {
+    const text = String(doc.ends_at);
+    const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):00:00Z$/.exec(text);
+    const ms = m ? Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4])) : NaN;
+    if (!m || new Date(ms).toISOString() !== `${text.slice(0, -1)}.000Z`) {
+      throw new Error(
+        `${source}: ends_at must be a UTC time on the hour, written like 2027-01-15T14:00:00Z, got ${text}`,
+      );
+    }
+    endsAt = ms / 1000;
+    const lengthSeconds = epochLength(config);
+    // It is a moment an epoch ends at: a whole number of epochs away from the start hour. One-day
+    // epochs all end at the start hour, and shorter ones at each hour one of them starts at.
+    if (startHourUtc !== null && (endsAt - startHourUtc * 3600) % lengthSeconds !== 0) {
+      const hour = startHourUtc;
+      const hours = Array.from({ length: DAY / lengthSeconds }, (_, k) => (hour + (k * lengthSeconds) / 3600) % 24)
+        .sort((a, b) => a - b)
+        .map((h) => `${String(h).padStart(2, "0")}:00`);
+      throw new Error(
+        `${source}: ends_at must be a time an epoch ends at, and with epoch_start_hour_utc ${startHourUtc} ` +
+          `${lengthSeconds === DAY ? "epochs" : `epochs of ${lengthSeconds} seconds`} end at ${hours.join(", ")} UTC; ` +
+          `got ${text}`,
+      );
+    }
+    // The file pays at least one epoch. The id of an epoch shorter than a day is the hour it starts at.
+    // A one-day epoch starts at the start hour of its date, and while that hour is undecided at
+    // midnight at the earliest, so an end that is not after that is wrong whatever the hour will be.
+    if (appliesFromEpoch !== null) {
+      const firstStart =
+        startHourUtc === null
+          ? parseEpochId(appliesFromEpoch, lengthSeconds) / 1000
+          : epochStart(appliesFromEpoch, startHourUtc, lengthSeconds);
+      if (endsAt <= firstStart) {
+        throw new Error(
+          `${source}: ends_at ${text} is not after the start of applies_from_epoch ${appliesFromEpoch}, ` +
+            "so this file would pay no epoch",
+        );
+      }
+    }
   }
 
   // Never optional: a blank here must not turn into "HOLLAR borrowers earn too".
@@ -141,6 +199,7 @@ export function parseProgram(
     budgetPerDay,
     startHourUtc,
     appliesFromEpoch,
+    endsAt,
     maxHollarDebt,
     sha256: sha256(text),
   };

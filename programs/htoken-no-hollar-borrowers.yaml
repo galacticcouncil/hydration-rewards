@@ -1,28 +1,34 @@
-# PRIME on HUSDC, HUSDT and HEURC, only for accounts that have not borrowed HOLLAR.
+# PRIME on HUSDC and HUSDT, only for accounts that have not borrowed HOLLAR.
 # See programs/README.md for every setting.
 #
 # Check the effect before changing anything live:
 #   node src/preview.ts --program programs/htoken-no-hollar-borrowers.yaml
 
-name: HUSDC, HUSDT and HEURC, no HOLLAR borrowers
+name: HUSDC and HUSDT, no HOLLAR borrowers
 
-# The first daily epoch these settings pay, as the UTC date it starts on (like 2027-01-15). Every
+# The first daily epoch these settings pay, as the UTC date it starts on (like 2026-12-15). Every
 # change to this file moves it to an epoch that has not been closed yet: closing an earlier epoch
 # with this file is refused, and so is a later one if the file changed without moving it. Blank
 # until decided.
-applies_from_epoch:
+applies_from_epoch: 2026-11-20
+
+# When the program ends, as a UTC time on the hour: the epoch that ends then is the last one these
+# settings pay, and it pays in full. No later epoch is closed with this file. This is the day the
+# PRIME stream this program replaces was set to end (at 14:00 UTC), at the hour this program's
+# epochs end. Blank for a program without an end.
+ends_at: 2027-01-15T16:00:00Z
 
 # PRIME per day for each earning asset, shared by eligible accounts in proportion to their
 # eligible value over the day. Blank until decided; closing an epoch refuses to run while blank.
 budget_per_day:
   HUSDC: 275.616
   HUSDT: 275.616
-  HEURC: 243.1296
 
-# Hour of the day (UTC, 0-23) when each daily epoch starts. Blank until decided.
-epoch_start_hour_utc: 14
+# Hour of the day (UTC, 0-23) when each daily epoch starts. It is the hour of ends_at, which has to
+# be a moment an epoch ends at.
+epoch_start_hour_utc: 16
 
-earn_on_supply_of: [HUSDC, HUSDT, HEURC]
+earn_on_supply_of: [HUSDC, HUSDT]
 
 # An account with more HOLLAR debt than this (in dollars, added up over the main, GIGAHDX and
 # BIL markets) earns nothing for that hour; hours without the debt still count. 0 means any

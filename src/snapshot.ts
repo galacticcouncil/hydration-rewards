@@ -4,7 +4,7 @@
 // The block is one of the hour's own blocks, picked by the hash of the first block after the hour
 // (src/lib/selection.ts), so an hour can only be taken once it is over and that block is finalized.
 // The node must serve the chain id in the config. At that block it reads:
-//   - aHUSDC / aHUSDT / aHEURC balance of every indexed address, and each aToken's total supply
+//   - the aToken balance (aHUSDC, aHUSDT) of every indexed address, and each aToken's total supply
 //   - HOLLAR variable debt on main, GIGAHDX and BIL (the only debt that counts; config debtAssets)
 //   - each market's AaveOracle price for every asset involved
 // Pools, oracles and token addresses are resolved at that block through each PoolAddressesProvider.
@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 import { compareAddresses } from "./lib/accounts.ts";
 import { loadDotEnv, messageOf, readJson, toJson, writeText } from "./lib/io.ts";
 import { decodeAddress, decodeReserveData, decodeUint, ethCall, SELECTORS, ZERO_ADDRESS } from "./lib/abi.ts";
+import { snapshotInterval } from "./lib/epoch.ts";
 import { usdRounded } from "./lib/format.ts";
 import { updateHolderIndex } from "./lib/holders.ts";
 import { makeRpc, toBlockTag } from "./lib/rpc.ts";
@@ -31,7 +32,6 @@ import { SNAPSHOT_FORMAT } from "./eligibility.ts";
 import type { Block, Config, Log, Rpc, Snapshot, SnapshotSelection } from "./types.ts";
 
 const ORACLE_UNIT = 10n ** 8n; // values are computed as 18-decimal amounts × 8-decimal prices
-const DAY = 86_400;
 
 async function getBlock(rpc: Pick<Rpc, "call">, tag: string): Promise<Block> {
   const b = (await rpc.call("eth_getBlockByNumber", [tag, false])) as {
@@ -368,7 +368,7 @@ export async function snapshotHour({
   log?: Log;
 }): Promise<{ path: string; snapshot: Snapshot }> {
   // Epochs start on an hour and take evenly spaced snapshots, so anything else would never be used.
-  const interval = DAY / config.epoch.snapshotsPerEpoch;
+  const interval = snapshotInterval(config);
   if (!Number.isInteger(target) || target % interval !== 0) {
     throw new Error(`a snapshot time must be a multiple of ${interval} seconds (on the hour), got ${target}`);
   }

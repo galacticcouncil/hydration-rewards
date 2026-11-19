@@ -3,11 +3,17 @@
 // is not for publication.
 //
 //   public/trees/<root>.json   claims and proofs for one root (ClaimsFile)
-//   public/latest.json         who is earning as of the newest snapshot (LatestFile)
+//   public/latest.json         who is earning as of the newest snapshot, and an estimate of what each
+//                              account has earned so far in the epoch still open (LatestFile)
 //
 // To claim, the app reads the root the distributor holds, fetches trees/<root>.json (a 404 means
 // nothing can be claimed yet) and calls claim(account, reward, claims[account].claimable, proof).
 // `claimable` is cumulative: what is still owed is claimable - claimed(account, reward).
+//
+// latest.json keeps its format name as it grows: fields are only added, and a reader ignores the ones
+// it does not know. `openEpoch` is such an addition, so a reader also accepts a file without it, and
+// so is `program.endsAt`, which only a program with an end has. Once such a program has ended no
+// epoch is open, and `openEpoch` is null.
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -20,6 +26,7 @@ import type {
   ClaimsFile,
   Denylist,
   LatestFile,
+  OpenEpoch,
   Program,
   RewardConfig,
   Snapshot,
@@ -33,7 +40,7 @@ export const claimsPath = (dataDir: string, root: string): string => join(dataDi
 
 export const latestPath = (dataDir: string): string => join(dataDir, "public", "latest.json");
 
-// Only what the root commits to. A day that pays nobody ends on the same root as the day before,
+// Only what the root commits to. An epoch that pays nobody ends on the same root as the epoch before,
 // so this file must come out the same whichever epoch wrote it.
 export function claimsFile(tree: Tree): ClaimsFile {
   return {
@@ -45,19 +52,24 @@ export function claimsFile(tree: Tree): ClaimsFile {
   };
 }
 
-// Who is earning at one snapshot, decided by the same eligibility code that pays the rewards.
+// Who is earning at one snapshot, decided by the same eligibility code that pays the rewards, and the
+// open epoch as the caller worked it out (src/accruing.ts), or null when the program has ended. The
+// open epoch's estimate is a map of its own, not a field of `accounts`: that lists only who supplied
+// at this one snapshot, and an account that left earlier in the epoch has still earned in it.
 export function latestFile({
   snapshot,
   program,
   reward,
   denylist,
   latestTree,
+  openEpoch,
 }: {
   snapshot: Snapshot;
   program: Program;
   reward: RewardConfig;
   denylist: Pick<Denylist, "reasonFor">;
   latestTree: { epoch: string; root: string } | null;
+  openEpoch: OpenEpoch | null;
 }): LatestFile {
   const { eligible, excluded, borrowers, debts } = snapshotEligibility(snapshot, {
     maxHollarDebt: program.maxHollarDebt,
@@ -85,7 +97,12 @@ export function latestFile({
     format: LATEST_FORMAT,
     asOf: { hour: snapshot.target, block: snapshot.block.number, blockTime: snapshot.block.timestamp },
     reward: { symbol: reward.symbol, address: reward.address, decimals: reward.decimals },
-    program: { name: program.name, sha256: program.sha256, maxHollarDebtUsd: usdExact(program.maxHollarDebt) },
+    program: {
+      name: program.name,
+      sha256: program.sha256,
+      maxHollarDebtUsd: usdExact(program.maxHollarDebt),
+      ...(program.endsAt === null ? {} : { endsAt: program.endsAt }),
+    },
     assets: Object.fromEntries(
       program.earn.map((name) => {
         const budget = program.budgetPerDay.get(name);
@@ -100,6 +117,7 @@ export function latestFile({
     ),
     accounts: Object.fromEntries(accounts),
     latestTree,
+    openEpoch,
   };
 }
 

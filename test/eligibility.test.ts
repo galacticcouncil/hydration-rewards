@@ -101,8 +101,8 @@ test("missing data stops the calculation instead of counting as zero", () => {
   assert.throws(() => snapshotEligibility(noHollar, { denylist, maxHollarDebt: FIVE }), /did not record HOLLAR debt/);
   // A snapshot taken before an asset was added to the config has no supply of it to count.
   assert.throws(
-    () => snapshotEligibility(s, { denylist, maxHollarDebt: FIVE, earn: ["HUSDT", "HEURC"] }),
-    /did not record supply of HEURC/,
+    () => snapshotEligibility(s, { denylist, maxHollarDebt: FIVE, earn: ["HUSDT", "HEXTRA"] }),
+    /did not record supply of HEXTRA/,
   );
   // @ts-expect-error the denylist is left out on purpose
   assert.throws(() => snapshotEligibility(noHollar, { maxHollarDebt: FIVE }), /denylist is required/);

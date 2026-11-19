@@ -6,8 +6,12 @@
 //   node src/preview.ts --program programs/my-program.yaml
 //     [--epoch 2026-11-12 | --snapshot data/snapshots/1794304800.json]
 //     [--csv out.csv] [--reward-price-usd 1.07]
-// Without --epoch or --snapshot it uses the most recent day of snapshots under data/snapshots.
-// --epoch needs the program's epoch_start_hour_utc to be filled in.
+// Without --epoch or --snapshot it uses the most recent epoch's worth of snapshots under
+// data/snapshots: a day of them, unless the config has shorter epochs (epoch.lengthSeconds).
+// --epoch needs the program's epoch_start_hour_utc to be filled in. For an epoch shorter than a day
+// it is the date and hour the epoch starts at, like 2026-11-17T03.
+// For a program with a first epoch, a start hour, an end and every budget filled in, it also shows how
+// many epochs the file pays and how much in all: the amount a funding referendum has to move.
 
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -19,10 +23,18 @@ import { allocate } from "./allocate.ts";
 import { epochWindow, loadEpochSnapshots } from "./close-epoch.ts";
 import { epochEligibility, SNAPSHOT_FORMAT } from "./eligibility.ts";
 import { loadDenylist } from "./lib/denylist.ts";
+import { DAY, epochLength } from "./lib/epoch.ts";
 import { loadProgram } from "./program.ts";
 import type { Config, Denylist, Program, RewardConfig, Snapshot } from "./types.ts";
 
 const pct = (part: number, whole: number): string => (whole > 0 ? `${((100 * part) / whole).toFixed(1)}%` : "-");
+
+// Raw reward units as an exact decimal number, without trailing zeros: 16812576000 -> "16812.576".
+function exactAmount(raw: bigint, decimals: number): string {
+  const digits = raw.toString().padStart(decimals + 1, "0");
+  const fraction = digits.slice(digits.length - decimals).replace(/0+$/, "");
+  return digits.slice(0, digits.length - decimals) + (fraction ? `.${fraction}` : "");
+}
 
 // A snapshot file this version can read, or an error that names the file and what to do about it.
 function readSnapshot(path: string): Snapshot {
@@ -39,8 +51,9 @@ function readSnapshot(path: string): Snapshot {
 function loadSnapshots(
   a: { snapshot?: string; epoch?: string; data: string },
   program: Program,
-  perEpoch: number,
+  config: Config,
 ): Snapshot[] {
+  const perEpoch = config.epoch.snapshotsPerEpoch;
   if (a.snapshot) return [readSnapshot(a.snapshot)];
   const dir = join(a.data, "snapshots");
   if (!existsSync(dir)) {
@@ -51,7 +64,7 @@ function loadSnapshots(
       throw new Error(
         "--epoch needs epoch_start_hour_utc to be filled in; leave --epoch out to use the latest snapshots",
       );
-    const window = epochWindow(a.epoch, program.startHourUtc);
+    const window = epochWindow(a.epoch, program.startHourUtc, epochLength(config));
     return loadEpochSnapshots({ dir, epoch: a.epoch, window, expected: perEpoch, allowPartial: true }).map(
       (l) => l.snapshot,
     );
@@ -78,7 +91,14 @@ export function previewProgram(
     denylist,
     reward,
     rewardPriceUsd = null,
-  }: { denylist: Denylist; reward: RewardConfig; rewardPriceUsd?: number | null },
+    lengthSeconds = DAY,
+  }: {
+    denylist: Denylist;
+    reward: RewardConfig;
+    rewardPriceUsd?: number | null;
+    // how long an epoch is, for what the file pays until its end: one day unless given
+    lengthSeconds?: number;
+  },
 ): { text: string; perAccount: PreviewRow[] } {
   const n = BigInt(snapshots.length);
   const { eligible, totals, excluded, borrowers, gross } = epochEligibility(snapshots, {
@@ -139,6 +159,22 @@ export function previewProgram(
       }
       lines.push(line);
     }
+    // What the file pays from its first epoch to its end. Each epoch pays its share of the day's budgets,
+    // rounded down as a close rounds it (closeEpochToDisk): all of them when epochs are one day long.
+    if (program.appliesFromEpoch !== null && program.startHourUtc !== null && program.endsAt !== null) {
+      const { start } = epochWindow(program.appliesFromEpoch, program.startHourUtc, lengthSeconds);
+      const epochs = BigInt((program.endsAt - start) / lengthSeconds);
+      const perAsset = [...budgets].map(([asset, budget]): [string, bigint] => [
+        asset,
+        ((budget * BigInt(lengthSeconds)) / BigInt(DAY)) * epochs,
+      ]);
+      const inAll = perAsset.reduce((sum, [, amount]) => sum + amount, 0n);
+      lines.push(
+        `Until ends_at it pays ${epochs} ${epochs === 1n ? "epoch" : "epochs"}, from ${program.appliesFromEpoch}: ` +
+          `${perAsset.map(([asset, amount]) => `${asset} ${exactAmount(amount, reward.decimals)}`).join(", ")}, ` +
+          `${exactAmount(inAll, reward.decimals)} ${reward.symbol} in all`,
+      );
+    }
     const top = [...perAccount].sort((x, y) => perDayOf(y) - perDayOf(x)).slice(0, 10);
     const totalPerDay = perAccount.reduce((s, r) => s + perDayOf(r), 0);
     lines.push("");
@@ -184,10 +220,11 @@ function main() {
     price = Number(a["reward-price-usd"]);
     if (!(price > 0)) throw new Error(`--reward-price-usd must be a positive number, got ${a["reward-price-usd"]}`);
   }
-  const { text, perAccount } = previewProgram(program, loadSnapshots(a, program, config.epoch.snapshotsPerEpoch), {
+  const { text, perAccount } = previewProgram(program, loadSnapshots(a, program, config), {
     denylist: loadDenylist(a.denylist),
     reward: config.reward,
     rewardPriceUsd: price,
+    lengthSeconds: epochLength(config),
   });
   console.log(text);
   if (a.csv) {
