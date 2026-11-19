@@ -1,0 +1,22 @@
+{
+  "migration": "distributor",
+  "environment": "prod",
+  "chainId": 222222,
+  "urdCommit": "3de504b130835a12482e00e1c83dcf369448c80b",
+  "steps": [
+    {
+      "name": "001-deploy-distributor",
+      "status": "completed",
+      "output": {
+        "address": "0x5ca17568846ed083fd0eb307382c69232bd787f0",
+        "deployTxHash": "0xb39a72ea85d02997258e414973d76a6411f3ba0282e8719522e1b6f1ae78fd66",
+        "block": 17176135,
+        "deployer": "0x71feb8b2849101a6e62e3369eaafdc6154cd0bc0",
+        "initialOwner": "0xaa7e0000000000000000000000000000000aa7e1",
+        "timelock": 43200,
+        "owner": "0xaa7e0000000000000000000000000000000aa7e1",
+        "updater": null
+      }
+    }
+  ]
+}
