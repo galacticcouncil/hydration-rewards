@@ -37,6 +37,20 @@
       "underlying": "0x000000000000000000000000000000010000006f",
       "aToken": "0x1806860d27ee903c1ec7586d4f7d598d7591f124",
       "deployBlock": 9333147
+    },
+    "HUSDC.wh": {
+      "assetId": 1114,
+      "market": "main",
+      "underlying": "0x0000000000000000000000000000000100000072",
+      "aToken": "0x8894940baa4c7c26d8d84247d93c6d2e40a5af4f",
+      "deployBlock": 17350000
+    },
+    "HUSDT.wh": {
+      "assetId": 1115,
+      "market": "main",
+      "underlying": "0x0000000000000000000000000000000100000073",
+      "aToken": "0xc92051fa011a1ce83f50a9b1ea8ebbddfa8ca272",
+      "deployBlock": 17350000
     }
   },
   "debtAssets": {
