@@ -129,6 +129,8 @@ const holderIndex = ({
     path: holdersPath,
     tokens: earning.map((h) => h.aToken),
     fromBlock: Math.min(...earning.map((h) => h.deployBlock)),
+    // An asset added to the config later is scanned from its own deployment (src/lib/holders.ts).
+    fromBlocks: Object.fromEntries(earning.map((h) => [h.aToken.toLowerCase(), h.deployBlock])),
     toBlock,
     rewind,
     maxSpan: config.logs.maxBlockSpan,
