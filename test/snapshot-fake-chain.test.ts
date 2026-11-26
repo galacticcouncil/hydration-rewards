@@ -331,6 +331,93 @@ test("the tail of the index can be scanned again to pick up a holder the node le
   assert.deepEqual(all.addresses, [USERS.a, USERS.b]);
 });
 
+test("an index takes on a token the config adds, scanned from its own first block before the index goes on", async () => {
+  const path = statePath();
+  const NEW = A(0xa3);
+  const { rpc } = chain({
+    logs: [
+      { address: AT.HUSDC, block: 3, to: USERS.a },
+      { address: NEW, block: 12, to: USERS.c },
+      { address: AT.HUSDT, block: 25, to: USERS.b },
+    ],
+  });
+  const first = await updateHolderIndex({
+    rpc,
+    path,
+    tokens: [AT.HUSDC, AT.HUSDT],
+    fromBlock: 1,
+    toBlock: 20,
+    maxSpan: 8,
+  });
+  assert.deepEqual(first.addresses, [USERS.a]);
+
+  const queries: string[] = [];
+  const watched = {
+    async call(method: string, params: unknown[]) {
+      const { address } = params[0] as { address: string[] };
+      queries.push(`${address.join("+")} ${rangeOf(params).join("-")}`);
+      return rpc.call(method, params);
+    },
+  };
+  const tokens = [AT.HUSDC, AT.HUSDT, NEW];
+  const grown = await updateHolderIndex({
+    rpc: watched,
+    path,
+    tokens,
+    fromBlock: 1,
+    fromBlocks: { [NEW]: 10 },
+    toBlock: 30,
+    maxSpan: 8,
+  });
+  assert.deepEqual(grown.tokens, [...tokens].sort());
+  assert.equal(grown.scannedTo, 30);
+  assert.deepEqual(grown.addresses, [USERS.a, USERS.b, USERS.c]);
+  // The new token alone from its first block up to where the index stood, then all three from there.
+  const all = [...tokens].sort().join("+");
+  assert.deepEqual(queries, [`${NEW} 10-17`, `${NEW} 18-20`, `${all} 21-28`, `${all} 29-30`]);
+});
+
+test("a new token joins the index only once its earlier blocks are all scanned", async () => {
+  const path = statePath();
+  const NEW = A(0xa3);
+  const { rpc } = chain({
+    logs: [
+      { address: NEW, block: 12, to: USERS.c },
+      { address: NEW, block: 19, to: USERS.b },
+    ],
+  });
+  const old = [AT.HUSDC, AT.HUSDT];
+  await updateHolderIndex({ rpc, path, tokens: old, fromBlock: 1, toBlock: 20, maxSpan: 8 });
+
+  let calls = 0;
+  const failsOnSecond = {
+    async call(method: string, params: unknown[]) {
+      if (++calls === 2) throw new Error("node down");
+      return rpc.call(method, params);
+    },
+  };
+  const options = { path, tokens: [...old, NEW], fromBlock: 1, fromBlocks: { [NEW]: 10 }, toBlock: 20, maxSpan: 8 };
+  await assert.rejects(updateHolderIndex({ ...options, rpc: failsOnSecond, concurrency: 1 }), /node down/);
+  const stopped = JSON.parse(readFileSync(path, "utf8"));
+  assert.deepEqual(stopped.tokens, [...old].sort(), "still the old tokens");
+  assert.deepEqual(stopped.addresses, [USERS.c], "what the first batch found is kept");
+  assert.equal(stopped.scannedTo, 20);
+
+  const done = await updateHolderIndex({ ...options, rpc });
+  assert.deepEqual(done.tokens, [...old, NEW].sort());
+  assert.deepEqual(done.addresses, [USERS.b, USERS.c]);
+});
+
+test("an index refuses a config that dropped or replaced one of its tokens", async () => {
+  const path = statePath();
+  const { rpc } = chain({ logs: [] });
+  await updateHolderIndex({ rpc, path, tokens: [AT.HUSDC, AT.HUSDT], fromBlock: 1, toBlock: 5, maxSpan: 8 });
+  await assert.rejects(
+    updateHolderIndex({ rpc, path, tokens: [AT.HUSDC, A(0xa3)], fromBlock: 1, toBlock: 5, maxSpan: 8 }),
+    new RegExp(`built for other tokens: the config no longer has ${AT.HUSDT}`),
+  );
+});
+
 test("one holder-index scan at a time, and a scan that fails still releases the lock", async () => {
   const path = statePath();
   const { rpc } = chain({ logs: [{ address: AT.HUSDC, block: 3, to: USERS.a }] });

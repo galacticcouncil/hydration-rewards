@@ -1,16 +1,17 @@
-# PRIME on HUSDC and HUSDT, only for accounts that have not borrowed HOLLAR.
+# PRIME on HUSDC and HUSDT, the Polkadot and the Wormhole ones, only for accounts that have not
+# borrowed HOLLAR.
 # See programs/README.md for every setting.
 #
 # Check the effect before changing anything live:
 #   node src/preview.ts --program programs/htoken-no-hollar-borrowers.yaml
 
-name: HUSDC and HUSDT, no HOLLAR borrowers
+name: HUSDC and HUSDT, Polkadot and Wormhole, no HOLLAR borrowers
 
 # The first daily epoch these settings pay, as the UTC date it starts on (like 2026-12-15). Every
 # change to this file moves it to an epoch that has not been closed yet: closing an earlier epoch
 # with this file is refused, and so is a later one if the file changed without moving it. Blank
 # until decided.
-applies_from_epoch: 2026-11-20
+applies_from_epoch: 2026-11-26
 
 # When the program ends, as a UTC time on the hour: the epoch that ends then is the last one these
 # settings pay, and it pays in full. No later epoch is closed with this file. This is the day the
@@ -20,15 +21,21 @@ ends_at: 2027-01-15T16:00:00Z
 
 # PRIME per day for each earning asset, shared by eligible accounts in proportion to their
 # eligible value over the day. Blank until decided; closing an epoch refuses to run while blank.
+# HUSDC.wh and HUSDT.wh are the Wormhole ones (assets 1114 and 1115), listed by referendum 465,
+# which enacts before this file's first epoch. Their 50 epochs of 275.616 each are paid from the
+# treasury's PRIME that referendum sends to the distributor (45 epochs) and, for the 5 epochs
+# before 1 December, from what the distributor held beyond everything HUSDC and HUSDT pay.
 budget_per_day:
   HUSDC: 275.616
   HUSDT: 275.616
+  HUSDC.wh: 275.616
+  HUSDT.wh: 275.616
 
 # Hour of the day (UTC, 0-23) when each daily epoch starts. It is the hour of ends_at, which has to
 # be a moment an epoch ends at.
 epoch_start_hour_utc: 16
 
-earn_on_supply_of: [HUSDC, HUSDT]
+earn_on_supply_of: [HUSDC, HUSDT, HUSDC.wh, HUSDT.wh]
 
 # An account with more HOLLAR debt than this (in dollars, added up over the main, GIGAHDX and
 # BIL markets) earns nothing for that hour; hours without the debt still count. 0 means any
